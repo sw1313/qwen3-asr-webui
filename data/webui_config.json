@@ -6,7 +6,7 @@
   "aligner_init_kwargs_json": "{}",
   "asr_checkpoint": "/models/Qwen3-ASR-1.7B",
   "asr_init_kwargs_json": "{}",
-  "attn_impl": "flash_attention_2",
+  "attn_impl": "",
   "backend": "transformers",
   "break_on_punct": false,
   "custom_output_dir": "",
