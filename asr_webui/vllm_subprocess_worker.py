@@ -106,7 +106,7 @@ def vllm_worker_one(
         q.put(("progress", 92))
 
         out_path_s = None
-        if content and ext and not (cancel_ev is not None and cancel_ev.is_set()):
+        if ext and not (cancel_ev is not None and cancel_ev.is_set()):
             out_dir = resolve_output_dir(
                 input_audio_path=ap,
                 mode=output_dir_mode_s,
