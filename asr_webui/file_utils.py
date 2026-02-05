@@ -4,6 +4,8 @@ from pathlib import Path
 
 
 AUDIO_EXTS_DEFAULT = [".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac", ".wma"]
+VIDEO_EXTS_DEFAULT = [".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v", ".ts"]
+MEDIA_EXTS_DEFAULT = AUDIO_EXTS_DEFAULT + VIDEO_EXTS_DEFAULT
 
 
 def list_audio_files(
@@ -16,7 +18,7 @@ def list_audio_files(
     if not p.exists() or not p.is_dir():
         raise FileNotFoundError(f"输入目录不存在或不是文件夹: {p}")
 
-    exts_n = [e.lower() if e.startswith(".") else f".{e.lower()}" for e in (exts or AUDIO_EXTS_DEFAULT)]
+    exts_n = [e.lower() if e.startswith(".") else f".{e.lower()}" for e in (exts or MEDIA_EXTS_DEFAULT)]
     pattern = "**/*" if recursive else "*"
     files = [x for x in p.glob(pattern) if x.is_file() and x.suffix.lower() in exts_n]
     return sorted(files)
