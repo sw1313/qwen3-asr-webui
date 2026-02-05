@@ -1,0 +1,4 @@
+qwen-asr
+gradio>=4.0.0
+numpy
+
