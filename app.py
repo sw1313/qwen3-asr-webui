@@ -46,7 +46,7 @@ import gradio as gr
 from asr_webui.batch_generate import CaptionConfig, generate_for_one_audio, write_output
 from asr_webui.cancel_token import CancelToken
 from asr_webui.config_store import default_webui_config_path, load_json, merge_update
-from asr_webui.file_utils import AUDIO_EXTS_DEFAULT, list_audio_files
+from asr_webui.file_utils import MEDIA_EXTS_DEFAULT, VIDEO_EXTS_DEFAULT, list_audio_files
 from asr_webui.file_utils import resolve_output_dir
 from asr_webui.qwen_runner import ASRConfig, DEFAULT_ALIGNER, DEFAULT_ASR, set_torch_threads, unload_model
 from asr_webui.vad import VadConfig, parse_json_dict as parse_vad_json_dict
@@ -174,12 +174,12 @@ def run_batch(
 
     if input_mode == "dir":
         exts = [x.strip() for x in (exts_csv or "").split(",") if x.strip()]
-        files = list_audio_files(input_dir, recursive=recursive, exts=exts or AUDIO_EXTS_DEFAULT)
+        files = list_audio_files(input_dir, recursive=recursive, exts=exts or MEDIA_EXTS_DEFAULT)
     else:
         files = _normalize_uploads(uploads)
 
     if not files:
-        return "未找到音频文件。请检查输入目录/后缀，或上传文件。\n", []
+        return "未找到音视频文件。请检查输入目录/后缀，或上传文件。\n", []
 
     backend_n = (backend or "transformers").strip().lower()
     requested_device = (device_map or "").strip().lower()
@@ -455,12 +455,14 @@ def run_batch_stream(
     try:
         if input_mode == "dir":
             exts = [x.strip() for x in (exts_csv or "").split(",") if x.strip()]
-            files = list_audio_files(input_dir, recursive=recursive, exts=exts or AUDIO_EXTS_DEFAULT)
+            files = list_audio_files(input_dir, recursive=recursive, exts=exts or MEDIA_EXTS_DEFAULT)
+            input_root = Path(input_dir).expanduser()
         else:
             files = _normalize_uploads(uploads)
+            input_root = None
 
         if not files:
-            yield _status_html(0, None), "未找到音频文件。请检查输入目录/后缀，或上传文件。\n", []
+            yield _status_html(0, None), "未找到音视频文件。请检查输入目录/后缀，或上传文件。\n", []
             return
 
         backend_n = (backend or "transformers").strip().lower()
@@ -538,6 +540,26 @@ def run_batch_stream(
         # Only show downloadable files at the END (avoid gradio re-caching conflicts mid-run).
         ui_paths: dict[str, Path] = {}
 
+        seen_folders: set[str] = set()
+
+        def _folder_label(p: Path) -> str:
+            # Group by immediate child folder under input_dir; do not include grandchildren.
+            if input_mode != "dir" or input_root is None:
+                return "（上传）"
+            try:
+                rel = p.relative_to(input_root)
+                if len(rel.parts) <= 1:
+                    return "（根目录）"
+                return str(rel.parts[0])
+            except Exception:
+                return "（其它）"
+
+        def _maybe_log_folder(p: Path) -> None:
+            folder = _folder_label(p)
+            if folder not in seen_folders:
+                seen_folders.add(folder)
+                logs.append(f"[处理文件夹] {folder}\n")
+
         def _ui_list() -> list[str]:
             return [str(p) for p in ui_paths.values()]
 
@@ -565,6 +587,7 @@ def run_batch_stream(
                     yield _status_html(0, None, "已取消"), "".join(logs), _ui_list()
                     return
 
+                _maybe_log_folder(audio_path)
                 logs.append(f"[处理中] {audio_path.name} ({i+1}/{n})\n")
                 yield _status_html(0, audio_path.name, f"{i+1}/{n}"), "".join(logs), []
 
@@ -676,6 +699,7 @@ def run_batch_stream(
                 yield _status_html(0, None, "已取消"), "".join(logs), _ui_list()
                 return
 
+            _maybe_log_folder(audio_path)
             logs.append(f"[处理中] {audio_path.name} ({i+1}/{n})\n")
             yield _status_html(0, audio_path.name, f"{i+1}/{n}"), "".join(logs), []
 
@@ -697,7 +721,7 @@ def run_batch_stream(
                         vad_cfg=vad_cfg,
                     )
                     out_path: Path | None = None
-                    if content and ext:
+                    if ext:
                         out_dir = resolve_output_dir(
                             input_audio_path=audio_path,
                             mode=output_dir_mode,
@@ -789,6 +813,22 @@ def build_ui() -> gr.Blocks:
         except Exception:
             pass
 
+    # Config migration: older configs may have audio-only `exts_csv`.
+    # Ensure video suffixes are included by default once video support is enabled.
+    try:
+        cur_exts = str(persisted.get("exts_csv", "") if isinstance(persisted, dict) else "").strip()
+        if cur_exts:
+            parts = [x.strip().lower() for x in cur_exts.split(",") if x.strip()]
+            parts = [p if p.startswith(".") else f".{p}" for p in parts]
+            has_video = any(p in set(VIDEO_EXTS_DEFAULT) for p in parts)
+            if not has_video:
+                merged = parts + [x for x in VIDEO_EXTS_DEFAULT if x not in parts]
+                new_exts = ",".join(merged)
+                persisted["exts_csv"] = new_exts
+                merge_update(cfg_path, {"exts_csv": new_exts})
+    except Exception:
+        pass
+
     def pick(key: str, default: Any, *, valid: set[Any] | None = None) -> Any:
         if isinstance(persisted, dict) and key in persisted:
             v = persisted.get(key)
@@ -852,11 +892,11 @@ def build_ui() -> gr.Blocks:
                 recursive = gr.Checkbox(value=as_bool(pick("recursive", True), True), label="递归子目录")
 
             exts_csv = gr.Textbox(
-                value=str(pick("exts_csv", ",".join(AUDIO_EXTS_DEFAULT))),
-                label="音频后缀（逗号分隔，仅目录扫描时生效）",
+                value=str(pick("exts_csv", ",".join(MEDIA_EXTS_DEFAULT))),
+                label="音视频后缀（逗号分隔，仅目录扫描时生效）",
             )
 
-            uploads = gr.Files(label="拖拽上传音频（可多选）", file_count="multiple")
+            uploads = gr.Files(label="拖拽上传音视频（可多选）", file_count="multiple")
 
         with gr.Accordion("输出", open=True):
             with gr.Row():
