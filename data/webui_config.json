@@ -43,6 +43,6 @@
   "vad_threshold": 0.1,
   "vad_window_size_samples": 512,
   "vllm_cuda_visible_devices": "0",
-  "vllm_gpu_memory_utilization": 0.9,
+  "vllm_gpu_memory_utilization": 0.7,
   "vllm_kwargs_json": "{\"max_model_len\": 16384}"
 }
