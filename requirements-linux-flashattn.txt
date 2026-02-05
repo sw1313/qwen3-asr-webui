@@ -1,0 +1,6 @@
+--no-build-isolation
+
+# FlashAttention 2（仅建议在 Linux + CUDA 环境安装）
+# 官方模型卡推荐命令：pip install -U flash-attn --no-build-isolation
+flash-attn
+
