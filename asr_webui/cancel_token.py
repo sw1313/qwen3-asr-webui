@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
+import signal
 import threading
+import time
 from typing import Any
 
 
@@ -52,6 +55,47 @@ class CancelToken:
         p = self._worker_proc
         if p is None:
             return
+        pid = getattr(p, "pid", None)
+
+        # First, try cooperative cancel signal (if any), then give it a moment.
+        try:
+            if self._mp_cancel is not None:
+                self._mp_cancel.set()
+        except Exception:
+            pass
+
+        # On POSIX, if the worker called setsid(), it becomes a session leader and its PGID==PID.
+        # Then we can kill the whole group safely to ensure EngineCore is also terminated.
+        if pid and os.name == "posix":
+            try:
+                pgid = os.getpgid(int(pid))
+            except Exception:
+                pgid = None
+            if pgid is not None and int(pgid) == int(pid):
+                try:
+                    os.killpg(int(pgid), signal.SIGTERM)
+                except Exception:
+                    pass
+
+                t0 = time.time()
+                while True:
+                    try:
+                        alive = bool(getattr(p, "is_alive", lambda: False)())
+                    except Exception:
+                        alive = False
+                    if not alive:
+                        break
+                    if time.time() - t0 > 2.0:
+                        break
+                    time.sleep(0.05)
+
+                try:
+                    if bool(getattr(p, "is_alive", lambda: False)()):
+                        os.killpg(int(pgid), signal.SIGKILL)
+                except Exception:
+                    pass
+
+        # Fallback: terminate the worker itself.
         try:
             if hasattr(p, "is_alive") and p.is_alive():
                 p.terminate()
