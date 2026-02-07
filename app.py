@@ -1095,6 +1095,11 @@ def build_ui() -> gr.Blocks:
 
             uploads = gr.Files(label="拖拽上传音视频（可多选）", file_count="multiple")
 
+            touch_album_root_mtime = gr.Checkbox(
+                value=as_bool(pick("touch_album_root_mtime", False), False),
+                label="更新专辑根目录修改时间（可选：触发输入目录一级子文件夹 mtime 更新）",
+            )
+
         with gr.Accordion("输出", open=True):
             with gr.Row():
                 output_format = gr.Radio(
@@ -1324,6 +1329,9 @@ def build_ui() -> gr.Blocks:
 
         def _poll_job_state():
             st = js_read_state() or {}
+            if not st:
+                # When cancelled / cleared, hard-reset UI (no stale progress/log).
+                return "", "", []
             pct = int(st.get("progress_pct", 0) or 0)
             name = st.get("current_file")
             cur = int(st.get("current_idx", 0) or 0)
@@ -1333,7 +1341,8 @@ def build_ui() -> gr.Blocks:
 
             # Flash 100% on file completion so UI doesn't miss it when files switch quickly.
             try:
-                flash_s = float(os.getenv("WEBUI_DONE_FLASH_S", "0.5"))
+                # Timer tick is 1.0s; default flash window must exceed that or UI can miss 100%.
+                flash_s = float(os.getenv("WEBUI_DONE_FLASH_S", "2.0"))
             except Exception:
                 flash_s = 1.5
             try:
@@ -1385,6 +1394,7 @@ def build_ui() -> gr.Blocks:
             "input_dir",
             "recursive",
             "exts_csv",
+            "touch_album_root_mtime",
             "output_format",
             "output_dir_mode",
             "custom_output_dir",
@@ -1431,6 +1441,7 @@ def build_ui() -> gr.Blocks:
             input_dir,
             recursive,
             exts_csv,
+            touch_album_root_mtime,
             output_format,
             output_dir_mode,
             custom_output_dir,
@@ -1490,6 +1501,41 @@ def build_ui() -> gr.Blocks:
                 # be tolerant to gradio component differences across versions
                 pass
 
+        # Textboxes / code editors often don't trigger .change() until blur/enter.
+        # Make autosave robust by marking config "dirty" on .input(), then a timer saves periodically.
+        cfg_dirty = gr.State(False)
+
+        def _mark_cfg_dirty(*_vals: Any) -> bool:
+            return True
+
+        def _persist_if_dirty(*vals_and_dirty: Any) -> tuple[Any, bool]:
+            try:
+                dirty = bool(vals_and_dirty[-1])
+            except Exception:
+                dirty = False
+            if not dirty:
+                return gr.update(), False
+            vals = vals_and_dirty[:-1]
+            msg = persist_config(*vals)
+            return msg, False
+
+        for c in persist_inputs:
+            try:
+                c.input(fn=_mark_cfg_dirty, inputs=None, outputs=[cfg_dirty], queue=False)
+            except Exception:
+                pass
+
+        # Reuse the existing 1s timer tick cadence: save config if dirty.
+        try:
+            timer.tick(
+                fn=_persist_if_dirty,
+                inputs=persist_inputs + [cfg_dirty],
+                outputs=[config_status, cfg_dirty],
+                queue=False,
+            )
+        except Exception:
+            pass
+
         def _start_detached(
             input_mode,
             input_dir,
@@ -1536,6 +1582,7 @@ def build_ui() -> gr.Blocks:
             context_prompt,
             language,
             torch_threads,
+            touch_album_root_mtime,
         ):
             msg = detached_start_job(
                 input_mode=input_mode,
@@ -1583,9 +1630,24 @@ def build_ui() -> gr.Blocks:
                 context_prompt=context_prompt,
                 language=language,
                 torch_threads=torch_threads,
+                touch_album_root_mtime=touch_album_root_mtime,
             )
-            # UI will update via Timer polling; just add a log line immediately.
-            return gr.update(), (msg + "\n"), []
+            # Force-refresh UI immediately (avoid relying on Timer if page has been open long).
+            shtml, log_txt, files = _poll_job_state()
+            # Always surface the action result at the top (log tail may still show old content).
+            log_txt = (msg + "\n") + (log_txt or "")
+            if not shtml:
+                # If state hasn't been written yet, still show a deterministic "starting" status.
+                shtml = (
+                    "<div style='display:flex;flex-direction:column;gap:6px;'>"
+                    "<div style='display:flex;justify-content:space-between;gap:12px;'>"
+                    "<div><b>当前音频</b>：启动中… | 0%</div>"
+                    "<div><b>0%</b></div></div>"
+                    "<div style='width:100%;height:12px;border:1px solid #e5e7eb;border-radius:999px;overflow:hidden;background:#f3f4f6;'>"
+                    "<div style='height:100%;width:0%;background:#f97316;transition:width 0.15s linear;'></div>"
+                    "</div></div>"
+                )
+            return shtml, log_txt, files
 
         run_evt = run_btn.click(
             fn=_start_detached,
@@ -1635,6 +1697,7 @@ def build_ui() -> gr.Blocks:
                 context_prompt,
                 language,
                 torch_threads,
+                touch_album_root_mtime,
             ],
             outputs=[status, log, out_files],
             queue=False,
@@ -1642,7 +1705,8 @@ def build_ui() -> gr.Blocks:
 
         def _cancel_now():
             msg = detached_cancel_job()
-            return gr.update(), (msg + "\n"), gr.update()
+            # Hard reset UI immediately. Also always show the cancel message.
+            return "", (msg + "\n"), []
 
         cancel_btn.click(
             fn=_cancel_now,
