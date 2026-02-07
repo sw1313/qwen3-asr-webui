@@ -148,7 +148,7 @@ docker run --rm -it --gpus all -p 7860:80 \
 > 适用：你希望把 HF 缓存与 torch.hub 缓存分别挂载到 NAS（并避免 `TRANSFORMERS_CACHE` FutureWarning）。
 
 ```bash
-docker run --gpus all -d --name qwen3-asr-webui --restart unless-stopped -p 7863:80 --shm-size=4g \
+docker run --gpus all -d --name qwen3-asr-webui --restart unless-stopped -p 7860:80 --shm-size=4g \
   -v /volume1/docker/asr/app:/app \
   -v /volume1/docker/asr/models:/models:ro \
   -v /volume1/docker/asr/data:/data \
@@ -342,4 +342,5 @@ python app.py --host 0.0.0.0 --port 7860
 
 - 挂载 `./cache:/cache` 确保持久缓存
 - 或准备本地 `silero-vad` 仓库并设置 `VAD_REPO_DIR`
+
 
