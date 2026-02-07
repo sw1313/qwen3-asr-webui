@@ -82,7 +82,7 @@ python app.py --host 0.0.0.0 --port 7860
 在项目根目录创建/准备：
 
 - `models/`：存放模型目录（例如 `models/Qwen3-ASR-1.7B`、`models/Qwen3-ForcedAligner-0.6B`）
-- `data/`：WebUI 配置持久化（默认写入 `data/webui_config.json`）
+- `data/`：持久化目录（WebUI 配置 `data/webui_config.json`；任务状态/日志 `data/job_state.json`、`data/job.log`）
 - `output/`：字幕输出目录
 - `cache/`：缓存（HF 模型缓存、torch.hub 的 VAD 缓存等，强烈推荐）
 
@@ -143,6 +143,28 @@ docker run --rm -it --gpus all -p 7860:80 \
   qwen3-asr-webui
 ```
 
+#### 群晖 / NAS（挂载分离缓存目录示例）
+
+> 适用：你希望把 HF 缓存与 torch.hub 缓存分别挂载到 NAS（并避免 `TRANSFORMERS_CACHE` FutureWarning）。
+
+```bash
+docker run --gpus all -d --name qwen3-asr-webui --restart unless-stopped -p 7863:80 --shm-size=4g \
+  -v /volume1/docker/asr/app:/app \
+  -v /volume1/docker/asr/models:/models:ro \
+  -v /volume1/docker/asr/data:/data \
+  -v /volume1/docker/asr/output:/output \
+  -v /volume1/docker/asr/cache/hf:/hf_cache \
+  -v /volume1/docker/asr/cache/torch:/torch_cache \
+  -v /volume1/docker/asr/vad_repo:/vad_repo:ro \
+  -e ASR_CHECKPOINT=/models/Qwen3-ASR-1.7B \
+  -e ALIGNER_CHECKPOINT=/models/Qwen3-ForcedAligner-0.6B \
+  -e OUTPUT_DIR=/output \
+  -e HF_HOME=/hf_cache \
+  -e TORCH_HOME=/torch_cache \
+  -e VAD_REPO_DIR=/vad_repo \
+  qwen3-asr-webui
+```
+
 #### CPU 运行（不推荐：很慢，但更通用）
 
 ```bash
@@ -172,11 +194,19 @@ docker run --rm -it -p 7860:80 \
 - **`HF_HUB_CACHE`**：HF Hub 缓存（默认 `/cache/hf/hub`）
 - **`TORCH_HOME`**：torch.hub 缓存（默认 `/cache/torch`，VAD 会用到）
 - **`XDG_CACHE_HOME`**：通用缓存目录（默认 `/cache`）
+- （兼容旧环境）如果你还设置了 **`TRANSFORMERS_CACHE`**：程序会自动迁移到 `HF_HOME/HF_HUB_CACHE` 并移除该变量，避免 Transformers 的 FutureWarning。推荐直接使用 `HF_HOME`。
 
 ### WebUI 配置持久化
 
 - **`WEBUI_CONFIG`** / **`WEBUI_CONFIG_PATH`**：WebUI 配置文件路径  
   - 默认：`/data/webui_config.json`（建议挂载 `./data:/data`）
+  - 行为：WebUI 所有控件修改会自动保存（包括文本框打字），默认每秒最多写入一次，适合 NAS 挂载。
+
+### 任务状态（断线续显）
+
+- 任务状态文件：`/data/job_state.json`
+- 任务日志文件：`/data/job.log`
+- **取消任务**或**容器重启后启动**：会按你的偏好自动清空 job 状态与日志。
 
 ### VAD（离线可用）
 
@@ -190,6 +220,8 @@ docker run --rm -it -p 7860:80 \
 ### 其它
 
 - **`TRANSFORMERS_NO_TORCHVISION`**：默认 `1`（避免某些环境下 torchvision 二进制不匹配导致崩溃）
+- **`ASR_PROGRESS_RTF`**：进度条“平滑预估”的实时因子（RTF，默认 `0.18`）。值越小进度走得越快；不影响真实推理速度。
+- **`WEBUI_DONE_FLASH_S`**：单个文件完成后强制闪到 100% 的窗口（默认 `2.0` 秒，避免轮询错过 100%）。
 
 ---
 
@@ -242,6 +274,12 @@ python app.py --host 0.0.0.0 --port 7860
 3) **模型**：默认会读环境变量 `ASR_CHECKPOINT / ALIGNER_CHECKPOINT`，通常不用再改  
 4) 点击“开始批量生成”
 
+### 任务执行模式（重要）
+
+- **任务是 detached 的**：点击开始后，即使你关闭浏览器页面，后台也会继续处理直到完成/取消。
+- **重新打开 WebUI 会自动续显**：进度条/日志通过轮询 `job_state.json/job.log` 恢复显示，无需保持原页面连接。
+- **取消**：会立即停止当前与剩余任务，并尽力释放显存（vLLM 会终止整个进程组以回收 EngineCore）。
+
 ### VAD（可选）
 
 - **适合**：长录音、静音多、批量处理时想更快/更稳
@@ -253,9 +291,7 @@ python app.py --host 0.0.0.0 --port 7860
 
 （可提前预热 hub 缓存）
 
-```bash
-python tools/prefetch_vad.py --mode hub
-```
+- 直接启动一次 WebUI 并跑一个短文件即可触发下载，缓存会写到 `TORCH_HOME`（建议挂载持久化）。
 
 ### vLLM（可选）
 
@@ -263,6 +299,17 @@ python tools/prefetch_vad.py --mode hub
 - 构建镜像时加：`--build-arg INSTALL_VLLM=1`
 - WebUI 里后端选择：`vLLM（官方推荐更快）`
 - 若显存不够：降低 `gpu_memory_utilization` 或设置 `VLLM_MAX_MODEL_LEN`
+
+### 视频/无声/空字幕的鲁棒处理
+
+- **支持视频文件**：会用 `ffmpeg` 自动提取音频后再做 ASR。
+- **无音轨/无声/无有效文字**：不会报错，会输出**空字幕文件**（SRT/LRC），确保批处理不中断。
+
+### 文件覆盖与目录时间
+
+- **同名不同后缀**（例如 `a.mp3`、`a.flac`）都会生成 `a.srt`：当你勾选“覆盖已存在文件”时会正确覆盖。
+- **原目录 mtime**：字幕写入采用原子替换，通常会更新字幕所在目录的 mtime。
+- **专辑根目录 mtime（可选）**：WebUI 提供“更新专辑根目录修改时间”开关，可让输入目录的**一级子目录**在首次生成输出后被 touch 一次（适合按专辑排序的 NAS 场景）。
 
 ### FlashAttention 2（可选）
 
