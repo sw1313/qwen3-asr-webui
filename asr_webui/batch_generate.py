@@ -7,7 +7,7 @@ import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 
@@ -144,6 +144,7 @@ def generate_for_one_audio(
     caption_cfg: CaptionConfig,
     transcribe_kwargs: dict | None = None,
     vad_cfg: VadConfig | None = None,
+    progress_cb: Any | None = None,
 ) -> tuple[str, str, str]:
     t0 = time.perf_counter()
     vad_cfg = vad_cfg or VadConfig(enabled=False)
@@ -160,7 +161,17 @@ def generate_for_one_audio(
     # Video support: if input is a video, extract audio via ffmpeg first.
     work_path = audio_path
     tmp_wav: Path | None = None
+    try:
+        if progress_cb:
+            progress_cb(0, "开始")
+    except Exception:
+        pass
     if _is_video_file(audio_path):
+        try:
+            if progress_cb:
+                progress_cb(2, "提取音频")
+        except Exception:
+            pass
         if not _ffprobe_has_audio_stream(audio_path):
             return f"[无音轨] {audio_path.name}：视频无音轨，输出空文件\n", "", out_ext
         tmp_wav = _extract_audio_to_wav(audio_path, sr=int(getattr(vad_cfg, "target_sr", 16000)))
@@ -178,8 +189,20 @@ def generate_for_one_audio(
                 pass
         return f"[无声] {audio_path.name}：检测到音频无声，输出空文件\n", "", out_ext
 
+    try:
+        if progress_cb:
+            progress_cb(5, "预处理完成")
+    except Exception:
+        pass
+
     if vad_cfg.enabled:
         segs = detect_speech_segments(work_path, cfg=vad_cfg)
+        try:
+            if progress_cb:
+                # user's expectation: VAD done should land around 10-15%
+                progress_cb(12, "VAD 完成")
+        except Exception:
+            pass
         if not segs:
             if tmp_wav is not None:
                 try:
@@ -237,6 +260,12 @@ def generate_for_one_audio(
         ts = getattr(r0, "time_stamps", None)
         tokens = iter_tokens(ts)
 
+    try:
+        if progress_cb:
+            progress_cb(85, "ASR 完成")
+    except Exception:
+        pass
+
     if tokens:
         segments = tokens_to_segments(
             tokens,
@@ -262,6 +291,12 @@ def generate_for_one_audio(
             "",
             out_ext,
         )
+
+    try:
+        if progress_cb:
+            progress_cb(92, "生成字幕")
+    except Exception:
+        pass
 
     if caption_cfg.output_format == "srt":
         content = segments_to_srt(segments) if segments else (text.strip() + "\n" if text.strip() else "")
@@ -297,7 +332,11 @@ def write_output(
     out_path = output_dir / f"{audio_path.stem}{ext}"
     if out_path.exists() and not overwrite:
         raise FileExistsError(f"输出文件已存在（未允许覆盖）: {out_path}")
-    out_path.write_text(content, encoding="utf-8")
+    # Write atomically: helps avoid partial files and also updates directory mtime on overwrite
+    # (rename/replace updates directory entry, while in-place overwrite may not).
+    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    tmp.replace(out_path)
     return out_path
 
 

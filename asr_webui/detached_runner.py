@@ -29,6 +29,7 @@ from .vllm_subprocess_batch_worker import vllm_worker_batch
 _JOB_LOCK = threading.Lock()
 _JOB_THREAD: threading.Thread | None = None
 _CANCEL_EV = threading.Event()
+_CURRENT_JOB_ID: str | None = None
 
 
 def _emit(line: str) -> None:
@@ -84,6 +85,23 @@ def _folder_label(*, p: Path, input_mode: str, input_dir: str) -> str:
         return str(rel.parts[0])
     except Exception:
         return "（其它）"
+
+
+def _album_root_dir(p: Path, *, input_mode: str, input_dir: str) -> Path | None:
+    """
+    Album root = immediate child directory under input_dir.
+    Example: input_dir=/musics/asmr, file=/musics/asmr/AlbumA/track1.mp3 -> /musics/asmr/AlbumA
+    """
+    if input_mode != "dir":
+        return None
+    try:
+        root = Path(input_dir).expanduser()
+        rel = p.relative_to(root)
+        if len(rel.parts) <= 1:
+            return None
+        return root / rel.parts[0]
+    except Exception:
+        return None
 
 def _normalize_language(lang: str) -> str | None:
     lang = (lang or "").strip()
@@ -157,22 +175,33 @@ def start_job(**params: Any) -> str:
     Start a detached background job. Returns a human-readable message.
     """
     global _JOB_THREAD
+    global _CURRENT_JOB_ID
     with _JOB_LOCK:
         if _JOB_THREAD is not None and _JOB_THREAD.is_alive():
             return "已有任务在运行中。"
         _CANCEL_EV.clear()
-        _JOB_THREAD = threading.Thread(target=_run_job, kwargs=params, daemon=True)
+        job_id = time.strftime("%Y%m%d_%H%M%S")
+        _CURRENT_JOB_ID = job_id
+        # Reset job state synchronously so UI can refresh immediately after clicking "开始".
+        try:
+            js_reset_job(job_id=job_id)
+            js_append_log("任务启动中…（可关闭页面，稍后回来会自动续显）\n")
+            js_update_state(dict(running=True, done=False, cancel_requested=False, progress_pct=0, current_file=None, current_idx=0))
+        except Exception:
+            pass
+        _JOB_THREAD = threading.Thread(target=_run_job, kwargs={**params, "job_id": job_id}, daemon=True)
         _JOB_THREAD.start()
         return "已启动任务（可关闭页面，稍后回来会自动续显）。"
 
 
 def cancel_job() -> str:
+    global _CURRENT_JOB_ID
     request_cancel()
+    # Prevent any further writes from the current job thread.
+    _CURRENT_JOB_ID = None
     # User preference: clear job log/state immediately on cancel click.
     try:
         js_clear_job()
-        js_append_log("已取消。\n")
-        js_update_state(dict(running=False, cancel_requested=True, done=True, progress_pct=0))
     except Exception:
         pass
     return "已请求取消。"
@@ -182,8 +211,13 @@ def _run_job(**p: Any) -> None:
     """
     Actual job runner.
     """
-    job_id = time.strftime("%Y%m%d_%H%M%S")
+    job_id = str(p.get("job_id") or time.strftime("%Y%m%d_%H%M%S"))
+
+    def _active() -> bool:
+        return bool(_CURRENT_JOB_ID == job_id and (not _CANCEL_EV.is_set()))
     try:
+        if _CURRENT_JOB_ID != job_id:
+            return
         js_reset_job(job_id=job_id)
     except Exception:
         pass
@@ -245,6 +279,7 @@ def _run_job(**p: Any) -> None:
 
         language = str(p.get("language") or "")
         torch_threads = int(p.get("torch_threads") or 4)
+        touch_album_root_mtime = bool(p.get("touch_album_root_mtime", False))
 
         # Prepare inputs
         if input_mode == "dir":
@@ -254,8 +289,9 @@ def _run_job(**p: Any) -> None:
             files = _normalize_uploads(uploads)
 
         if not files:
-            _emit("未找到音视频文件。请检查输入目录/后缀，或上传文件。\n")
-            js_update_state(dict(running=False, done=True, progress_pct=0, total=0, current_file=None))
+            if _active():
+                _emit("未找到音视频文件。请检查输入目录/后缀，或上传文件。\n")
+                js_update_state(dict(running=False, done=True, progress_pct=0, total=0, current_file=None))
             return
 
         backend_n = backend.strip().lower()
@@ -345,6 +381,23 @@ def _run_job(**p: Any) -> None:
 
         output_files: dict[str, str] = {}
         seen_folders: set[str] = set()
+        touched_albums: set[str] = set()
+
+        def _touch_album_root(fp: Path) -> None:
+            if not touch_album_root_mtime:
+                return
+            ar = _album_root_dir(fp, input_mode=input_mode, input_dir=input_dir)
+            if ar is None:
+                return
+            key = str(ar)
+            # Touch at most once per album to reduce NAS metadata churn.
+            if key in touched_albums:
+                return
+            try:
+                os.utime(ar, None)
+                touched_albums.add(key)
+            except Exception:
+                pass
 
         def maybe_folder_log(fp: Path) -> None:
             folder = _folder_label(p=fp, input_mode=input_mode, input_dir=input_dir)
@@ -403,6 +456,15 @@ def _run_job(**p: Any) -> None:
             cur_idx = 0
             cur_name: str | None = None
             while True:
+                if not _active():
+                    # best-effort stop
+                    try:
+                        ct = CancelToken()
+                        ct.attach_worker(proc=proc, mp_cancel=mp_cancel)
+                        ct.terminate_worker()
+                    except Exception:
+                        pass
+                    return
                 if _CANCEL_EV.is_set():
                     try:
                         mp_cancel.set()
@@ -450,9 +512,10 @@ def _run_job(**p: Any) -> None:
                     start_idx0 = int(cur_idx - 1)
                     retry_same = 0
                     fp = Path(files[cur_idx - 1])
-                    maybe_folder_log(fp)
-                    _emit(f"[处理中] {cur_name} ({cur_idx}/{total})\n")
-                    js_update_state(dict(progress_pct=0, current_file=cur_name, current_idx=cur_idx, total=total))
+                    if _active():
+                        maybe_folder_log(fp)
+                        _emit(f"[处理中] {cur_name} ({cur_idx}/{total})\n")
+                        js_update_state(dict(progress_pct=0, current_file=cur_name, current_idx=cur_idx, total=total))
                     file_t0 = time.perf_counter()
                     base_pct = 0
                     dur_s = _get_media_duration_s(fp)
@@ -460,18 +523,22 @@ def _run_job(**p: Any) -> None:
                 elif msg_type == "progress":
                     pct = int(payload)
                     base_pct = max(base_pct, pct)
-                    js_update_state(dict(progress_pct=pct, current_file=cur_name, current_idx=cur_idx, total=n))
+                    if _active():
+                        js_update_state(dict(progress_pct=pct, current_file=cur_name, current_idx=cur_idx, total=n))
                 elif msg_type == "file_done":
                     idx1, total, log_line, out_path_s = payload
-                    _emit(str(log_line))
+                    if _active():
+                        _emit(str(log_line))
                     if out_path_s:
                         outp = Path(out_path_s)
                         ui = _copy_to_ui(outp, audio_path=Path(files[idx1 - 1]), ui_output_dir=ui_output_dir, ext=outp.suffix, idx=len(output_files) + 1, input_mode=input_mode, input_dir=input_dir)
                         output_files[str(ui)] = str(ui)
+                        _touch_album_root(Path(files[idx1 - 1]))
                     start_idx0 = int(idx1)
                     file_t0 = None
                     base_pct = 0
-                    js_update_state(
+                    if _active():
+                        js_update_state(
                         dict(
                             progress_pct=100,
                             current_file=cur_name,
@@ -485,7 +552,8 @@ def _run_job(**p: Any) -> None:
                 elif msg_type == "file_error":
                     idx1, total, msg = payload
                     name = Path(files[idx1 - 1]).name if idx1 else (cur_name or "unknown")
-                    _emit(f"[失败] {name}: {msg}\n")
+                    if _active():
+                        _emit(f"[失败] {name}: {msg}\n")
                     if isinstance(msg, str) and ("CUDA out of memory" in msg or "out of memory" in msg.lower()):
                         _emit("[警告] 检测到 OOM：重启 vLLM 并下调 gpu_memory_utilization 后继续…\n")
                         # terminate current worker tree
@@ -505,37 +573,86 @@ def _run_job(**p: Any) -> None:
                 elif msg_type == "done":
                     break
 
-            js_update_state(dict(running=False, done=True, progress_pct=100, output_files=list(output_files.values())))
-            _emit("全部完成。\n")
+            if _active():
+                js_update_state(dict(running=False, done=True, progress_pct=100, output_files=list(output_files.values())))
+                _emit("全部完成。\n")
             return
 
         # transformers backend (in-process)
+        try:
+            rtf_est_tf = float(os.getenv("ASR_PROGRESS_RTF", "0.18"))
+        except Exception:
+            rtf_est_tf = 0.18
         for i, fp in enumerate(files, start=1):
-            if _CANCEL_EV.is_set():
+            if _CANCEL_EV.is_set() or (not _active()):
                 _emit("已取消：停止后续任务。\n")
-                js_update_state(dict(running=False, cancel_requested=True, done=True, output_files=list(output_files.values())))
+                if _active():
+                    js_update_state(dict(running=False, cancel_requested=True, done=True, output_files=list(output_files.values())))
                 return
 
-            maybe_folder_log(fp)
-            _emit(f"[处理中] {fp.name} ({i}/{n})\n")
-            js_update_state(dict(progress_pct=0, current_file=fp.name, current_idx=i, total=n))
+            if _active():
+                maybe_folder_log(fp)
+                _emit(f"[处理中] {fp.name} ({i}/{n})\n")
+                js_update_state(dict(progress_pct=0, current_file=fp.name, current_idx=i, total=n))
+
+            # Smooth progress ticker (keeps transformers progress consistent with vLLM UX).
+            base_pct = 0
+            ticker_stop = threading.Event()
+            t0 = time.perf_counter()
+            dur_s = _get_media_duration_s(fp)
+            expected_s = max(3.0, (dur_s or 30.0) * max(0.1, float(rtf_est_tf)))
+
+            def _ticker() -> None:
+                nonlocal base_pct
+                last_sent = -1
+                while (not ticker_stop.is_set()) and _active() and (not _CANCEL_EV.is_set()):
+                    try:
+                        now = time.perf_counter()
+                        elapsed = max(0.0, now - t0)
+                        if vad_cfg.enabled and base_pct < 12:
+                            target = 9
+                        else:
+                            target = 90
+                        span = max(1, target - int(base_pct))
+                        frac = min(0.98, elapsed / max(1.0, float(expected_s)))
+                        pct_sim = max(int(base_pct), min(target, int(base_pct) + int(round(frac * span))))
+                        if pct_sim > last_sent:
+                            last_sent = pct_sim
+                            js_update_state(dict(progress_pct=int(pct_sim), current_file=fp.name, current_idx=i, total=n))
+                    except Exception:
+                        pass
+                    ticker_stop.wait(0.5)
+
+            ticker_th = threading.Thread(target=_ticker, daemon=True)
+            ticker_th.start()
 
             def _progress_cb(pct: int, _stage: str = "") -> None:
+                nonlocal base_pct
                 try:
-                    js_update_state(dict(progress_pct=int(pct), current_file=fp.name, current_idx=i, total=n))
+                    if _active():
+                        base_pct = max(int(base_pct), int(pct))
+                        js_update_state(dict(progress_pct=int(pct), current_file=fp.name, current_idx=i, total=n))
                 except Exception:
                     pass
 
-            log_line, content, ext = generate_for_one_audio(
-                fp,
-                asr_cfg=asr_cfg,
-                language=_normalize_language(language),
-                caption_cfg=cap_cfg,
-                transcribe_kwargs=transcribe_kwargs or None,
-                vad_cfg=vad_cfg,
-                progress_cb=_progress_cb,
-            )
-            _emit(str(log_line))
+            try:
+                log_line, content, ext = generate_for_one_audio(
+                    fp,
+                    asr_cfg=asr_cfg,
+                    language=_normalize_language(language),
+                    caption_cfg=cap_cfg,
+                    transcribe_kwargs=transcribe_kwargs or None,
+                    vad_cfg=vad_cfg,
+                    progress_cb=_progress_cb,
+                )
+            finally:
+                ticker_stop.set()
+                try:
+                    ticker_th.join(timeout=1.0)
+                except Exception:
+                    pass
+            if _active():
+                _emit(str(log_line))
 
             out_dir = resolve_output_dir(
                 input_audio_path=fp,
@@ -546,7 +663,9 @@ def _run_job(**p: Any) -> None:
             outp = write_output(audio_path=fp, content=content, ext=ext, output_dir=out_dir, overwrite=overwrite)
             ui = _copy_to_ui(outp, audio_path=fp, ui_output_dir=ui_output_dir, ext=outp.suffix, idx=len(output_files) + 1, input_mode=input_mode, input_dir=input_dir)
             output_files[str(ui)] = str(ui)
-            js_update_state(
+            _touch_album_root(fp)
+            if _active():
+                js_update_state(
                 dict(
                     progress_pct=100,
                     current_file=fp.name,
@@ -558,12 +677,15 @@ def _run_job(**p: Any) -> None:
                 )
             )
 
-        js_update_state(dict(running=False, done=True, progress_pct=100, output_files=list(output_files.values())))
-        _emit("全部完成。\n")
+        if _active():
+            js_update_state(dict(running=False, done=True, progress_pct=100, output_files=list(output_files.values())))
+            _emit("全部完成。\n")
     except Exception as e:
-        _emit(f"[失败] {e}\n")
+        if _active():
+            _emit(f"[失败] {e}\n")
         try:
-            js_update_state(dict(running=False, done=True, last_error=str(e)))
+            if _active():
+                js_update_state(dict(running=False, done=True, last_error=str(e)))
         except Exception:
             pass
     finally:
