@@ -1100,6 +1100,11 @@ def build_ui() -> gr.Blocks:
                 label="更新专辑根目录修改时间（可选：触发输入目录一级子文件夹 mtime 更新）",
             )
 
+            dedup_same_name_same_duration = gr.Checkbox(
+                value=as_bool(pick("dedup_same_name_same_duration", False), False),
+                label="同名同长度去重（可选：一级子目录内同名且时长相同的音视频只转录一个，其它复制字幕）",
+            )
+
         with gr.Accordion("输出", open=True):
             with gr.Row():
                 output_format = gr.Radio(
@@ -1107,7 +1112,23 @@ def build_ui() -> gr.Blocks:
                     value=pick("output_format", "srt", valid={"srt", "lrc"}),
                     label="输出格式",
                 )
-                overwrite = gr.Checkbox(value=as_bool(pick("overwrite", False), False), label="覆盖已存在文件")
+                # Mutually exclusive policy for existing same-name subtitles.
+                def _pick_existing_policy() -> str:
+                    v = str(pick("existing_subtitle_policy", "") or "").strip().lower()
+                    if v in {"skip", "overwrite"}:
+                        return v
+                    # migrate from old boolean keys
+                    if as_bool(pick("skip_if_subtitle_exists", False), False):
+                        return "skip"
+                    if as_bool(pick("overwrite", False), False):
+                        return "overwrite"
+                    return "skip"
+
+                existing_subtitle_policy = gr.Radio(
+                    choices=[("跳过已存在字幕", "skip"), ("覆盖已存在字幕", "overwrite")],
+                    value=_pick_existing_policy(),
+                    label="同路径已存在同名字幕时",
+                )
 
             with gr.Row():
                 output_dir_mode = gr.Radio(
@@ -1395,10 +1416,11 @@ def build_ui() -> gr.Blocks:
             "recursive",
             "exts_csv",
             "touch_album_root_mtime",
+            "dedup_same_name_same_duration",
             "output_format",
             "output_dir_mode",
             "custom_output_dir",
-            "overwrite",
+            "existing_subtitle_policy",
             "backend",
             "asr_checkpoint",
             "aligner_checkpoint",
@@ -1442,10 +1464,11 @@ def build_ui() -> gr.Blocks:
             recursive,
             exts_csv,
             touch_album_root_mtime,
+            dedup_same_name_same_duration,
             output_format,
             output_dir_mode,
             custom_output_dir,
-            overwrite,
+            existing_subtitle_policy,
             backend,
             asr_checkpoint,
             aligner_checkpoint,
@@ -1545,7 +1568,7 @@ def build_ui() -> gr.Blocks:
             output_format,
             output_dir_mode,
             custom_output_dir,
-            overwrite,
+            existing_subtitle_policy,
             backend,
             asr_checkpoint,
             aligner_checkpoint,
@@ -1583,7 +1606,11 @@ def build_ui() -> gr.Blocks:
             language,
             torch_threads,
             touch_album_root_mtime,
+            dedup_same_name_same_duration,
         ):
+            pol = str(existing_subtitle_policy or "skip").strip().lower()
+            skip_if_subtitle_exists = pol == "skip"
+            overwrite = pol == "overwrite"
             msg = detached_start_job(
                 input_mode=input_mode,
                 input_dir=input_dir,
@@ -1631,6 +1658,8 @@ def build_ui() -> gr.Blocks:
                 language=language,
                 torch_threads=torch_threads,
                 touch_album_root_mtime=touch_album_root_mtime,
+                dedup_same_name_same_duration=dedup_same_name_same_duration,
+                skip_if_subtitle_exists=skip_if_subtitle_exists,
             )
             # Force-refresh UI immediately (avoid relying on Timer if page has been open long).
             shtml, log_txt, files = _poll_job_state()
@@ -1660,7 +1689,7 @@ def build_ui() -> gr.Blocks:
                 output_format,
                 output_dir_mode,
                 custom_output_dir,
-                overwrite,
+                existing_subtitle_policy,
                 backend,
                 asr_checkpoint,
                 aligner_checkpoint,
@@ -1698,6 +1727,7 @@ def build_ui() -> gr.Blocks:
                 language,
                 torch_threads,
                 touch_album_root_mtime,
+                dedup_same_name_same_duration,
             ],
             outputs=[status, log, out_files],
             queue=False,
