@@ -6,6 +6,36 @@
 - **输出**：SRT / LRC
 - **可选**：VAD 预处理（去长静音、按语音段转写）、vLLM 后端、FlashAttention 2
 
+---
+
+## WebUI 优势（为什么适合 NAS / 群晖大批量）
+
+这套 WebUI 不是“能跑就行”，而是专门针对 **NAS + Docker + 超大批量音视频** 做了很多增强，重点优势如下：
+
+- **任务 detached（断线也继续跑）**  
+  点击开始后，后台任务与浏览器会话解耦；你关闭页面/换设备再打开，仍能继续看到进度与日志。
+
+- **断线续显（进度/日志可恢复）**  
+  任务状态与日志持久化到 `data/`（`job_state.json` / `job.log`），页面通过轮询恢复显示，适合 NAS 的长时间批处理。
+
+- **强取消（尽力释放显存）**  
+  一键取消会停止当前与剩余任务，并对 vLLM 采用“终止整个进程组”的方式尽量回收 `EngineCore` 显存占用。
+
+- **批量鲁棒（不会因为脏文件中断）**  
+  支持视频文件（`ffmpeg` 提取音频），并对“无音轨/无声/无有效转写”输出空字幕而非报错中断。
+
+- **按一级子目录（专辑）逐个处理**  
+  日志先显示当前处理的“专辑文件夹”，并支持“整文件夹全有字幕则跳过”，非常适合按专辑管理的大库。
+
+- **同名同长度去重 + 复制字幕（可选）**  
+  一级子目录内若存在同名且时长相同的音/视频，只转录一份，其它文件通过复制字幕快速补齐，节省大量算力。
+
+- **vLLM 常驻引擎（更快且稳定）**  
+  在 vLLM 后端下，模型/引擎可常驻一个子进程：按文件夹逐批次喂给引擎执行，避免反复初始化带来的时间与显存波动。
+
+- **配置自动保存（NAS 友好）**  
+  所有控件修改会自动写入 `data/webui_config.json`（文本框打字也会自动保存），重启容器后仍保留配置。
+
 模型说明（Hugging Face）：
 - [Qwen/Qwen3-ASR-1.7B](https://huggingface.co/Qwen/Qwen3-ASR-1.7B)
 - [Qwen/Qwen3-ForcedAligner-0.6B](https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B)
@@ -148,7 +178,7 @@ docker run --rm -it --gpus all -p 7860:80 \
 > 适用：你希望把 HF 缓存与 torch.hub 缓存分别挂载到 NAS（并避免 `TRANSFORMERS_CACHE` FutureWarning）。
 
 ```bash
-docker run --gpus all -d --name qwen3-asr-webui --restart unless-stopped -p 7860:80 --shm-size=4g \
+docker run --gpus all -d --name qwen3-asr-webui --restart unless-stopped -p 7863:80 --shm-size=4g \
   -v /volume1/docker/asr/app:/app \
   -v /volume1/docker/asr/models:/models:ro \
   -v /volume1/docker/asr/data:/data \
@@ -215,7 +245,7 @@ docker run --rm -it -p 7860:80 \
 
 ### vLLM 相关
 
-- **`VLLM_MAX_MODEL_LEN`**：未显式指定时，默认给 vLLM 的 `max_model_len` 上限（默认 `16384`，防止 16GB 级显卡 KV cache 启动失败）
+- **`VLLM_MAX_MODEL_LEN`**：未显式指定时，默认给 vLLM 的 `max_model_len` 上限（默认 `12288`，用于减少 KV cache 启动失败/显存不足风险）
 
 ### 其它
 
@@ -307,7 +337,10 @@ python app.py --host 0.0.0.0 --port 7860
 
 ### 文件覆盖与目录时间
 
-- **同名不同后缀**（例如 `a.mp3`、`a.flac`）都会生成 `a.srt`：当你勾选“覆盖已存在文件”时会正确覆盖。
+- **已存在同名字幕策略（二选一）**：WebUI 中“同路径已存在同名字幕时”是一个互斥选项  
+  - 选 **跳过**：检测到音频文件同目录已有同名 `.srt/.lrc` 时跳过转录  
+  - 选 **覆盖**：忽略已有字幕并重新生成（会覆盖写入）
+- **同名不同后缀**（例如 `a.mp3`、`a.flac`）都会生成 `a.srt`：配合上面的“跳过/覆盖”策略可控制行为。
 - **原目录 mtime**：字幕写入采用原子替换，通常会更新字幕所在目录的 mtime。
 - **专辑根目录 mtime（可选）**：WebUI 提供“更新专辑根目录修改时间”开关，可让输入目录的**一级子目录**在首次生成输出后被 touch 一次（适合按专辑排序的 NAS 场景）。
 
@@ -342,5 +375,4 @@ python app.py --host 0.0.0.0 --port 7860
 
 - 挂载 `./cache:/cache` 确保持久缓存
 - 或准备本地 `silero-vad` 仓库并设置 `VAD_REPO_DIR`
-
 
