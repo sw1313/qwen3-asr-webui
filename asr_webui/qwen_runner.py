@@ -186,7 +186,41 @@ def _maybe_local_default(model_dir_name: str, hf_id: str) -> str:
     return hf_id
 
 
-DEFAULT_ASR = _maybe_local_default("Qwen3-ASR-1.7B", "Qwen/Qwen3-ASR-1.7B")
+def _maybe_local_any(candidates: list[tuple[str, str]]) -> str:
+    """
+    Pick the first existing local model dir from candidates; otherwise return the first HF id.
+    candidates: [(local_dir_name, hf_id), ...]
+    """
+    here = Path(__file__).resolve().parent.parent
+    root = Path.cwd()
+    for model_dir_name, _hf_id in candidates:
+        try:
+            local = here / model_dir_name
+            if local.exists():
+                return str(local)
+        except Exception:
+            pass
+        try:
+            local2 = root / model_dir_name
+            if local2.exists():
+                return str(local2)
+        except Exception:
+            pass
+    return candidates[0][1]
+
+
+ASR_PRESETS: dict[str, str] = {
+    "Qwen3-ASR-1.7B": _maybe_local_default("Qwen3-ASR-1.7B", "Qwen/Qwen3-ASR-1.7B"),
+    "Qwen3-ASR-0.6B": _maybe_local_default("Qwen3-ASR-0.6B", "Qwen/Qwen3-ASR-0.6B"),
+}
+
+# Default: prefer local 1.7B, else local 0.6B, else HF 1.7B.
+DEFAULT_ASR = _maybe_local_any(
+    [
+        ("Qwen3-ASR-1.7B", "Qwen/Qwen3-ASR-1.7B"),
+        ("Qwen3-ASR-0.6B", "Qwen/Qwen3-ASR-0.6B"),
+    ]
+)
 DEFAULT_ALIGNER = _maybe_local_default("Qwen3-ForcedAligner-0.6B", "Qwen/Qwen3-ForcedAligner-0.6B")
 
 # allow overriding defaults by env (useful in docker)
