@@ -1,14 +1,16 @@
 # Qwen3-ASR 批量字幕生成 WebUI（SRT / LRC）
 
 基于 `qwen-asr` 的批量转写 WebUI，支持：
-- **ASR**：`Qwen3-ASR-1.7B`
+- **ASR**：`Qwen3-ASR-1.7B` / `Qwen3-ASR-0.6B`
 - **强制对齐/时间戳**：`Qwen3-ForcedAligner-0.6B`
 - **输出**：SRT / LRC
 - **可选**：VAD 预处理（去长静音、按语音段转写）、vLLM 后端、FlashAttention 2
 
 ---
 
-## WebUI 优势
+## WebUI 优势（为什么适合 NAS / 群晖大批量）
+
+这套 WebUI 不是“能跑就行”，而是专门针对 **NAS + Docker + 超大批量音视频** 做了很多增强，重点优势如下：
 
 - **任务 detached（断线也继续跑）**  
   点击开始后，后台任务与浏览器会话解耦；你关闭页面/换设备再打开，仍能继续看到进度与日志。
@@ -36,6 +38,7 @@
 
 模型说明（Hugging Face）：
 - [Qwen/Qwen3-ASR-1.7B](https://huggingface.co/Qwen/Qwen3-ASR-1.7B)
+- [Qwen/Qwen3-ASR-0.6B](https://huggingface.co/Qwen/Qwen3-ASR-0.6B)
 - [Qwen/Qwen3-ForcedAligner-0.6B](https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B)
 
 ---
@@ -84,7 +87,7 @@ python -c "import torch; print(torch.__version__); print(torch.cuda.is_available
 
 #### 2) 准备模型
 
-- **方式 A（推荐）**：把模型目录放在 `.\models\Qwen3-ASR-1.7B` 与 `.\models\Qwen3-ForcedAligner-0.6B`
+- **方式 A（推荐）**：把模型目录放在 `.\models\Qwen3-ASR-1.7B`（或 `.\models\Qwen3-ASR-0.6B`）与 `.\models\Qwen3-ForcedAligner-0.6B`
 - **方式 B**：不放本地，直接填 Hugging Face 模型 ID（首次需要联网下载）
 
 #### 3) 启动 WebUI
@@ -210,7 +213,7 @@ docker run --rm -it -p 7860:80 \
 ### 必选/常用
 
 - **`ASR_CHECKPOINT`**：ASR 模型路径或 HF ID  
-  - 例：`/models/Qwen3-ASR-1.7B` 或 `Qwen/Qwen3-ASR-1.7B`
+  - 例：`/models/Qwen3-ASR-1.7B` / `/models/Qwen3-ASR-0.6B` 或 `Qwen/Qwen3-ASR-1.7B` / `Qwen/Qwen3-ASR-0.6B`
 - **`ALIGNER_CHECKPOINT`**：强制对齐模型路径或 HF ID  
   - 例：`/models/Qwen3-ForcedAligner-0.6B`
 - **`OUTPUT_DIR`**：输出目录（默认 `/output`，建议挂载）
