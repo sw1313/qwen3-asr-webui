@@ -183,6 +183,10 @@ def _maybe_local_default(model_dir_name: str, hf_id: str) -> str:
     local2 = root / model_dir_name
     if local2.exists():
         return str(local2)
+    # docker/nas common mount point
+    local3 = Path("/models") / model_dir_name
+    if local3.exists():
+        return str(local3)
     return hf_id
 
 
@@ -209,9 +213,33 @@ def _maybe_local_any(candidates: list[tuple[str, str]]) -> str:
     return candidates[0][1]
 
 
+def _prefer_models_dir(model_dir_name: str, hf_id: str) -> str:
+    """
+    For WebUI presets, prefer a local-looking path under a `models/` directory so the textbox
+    shows something like `/models/Qwen3-ASR-0.6B` instead of `Qwen/...`.
+    Falls back to HF id if no reasonable local models dir is present.
+    """
+    # 1) docker/nas typical mount
+    try:
+        m = Path("/models")
+        if m.exists() and m.is_dir():
+            return str(m / model_dir_name)
+    except Exception:
+        pass
+    # 2) repo root ./models
+    try:
+        m2 = Path.cwd() / "models"
+        if m2.exists() and m2.is_dir():
+            return str(m2 / model_dir_name)
+    except Exception:
+        pass
+    # 3) fallback to any detected local path, else HF
+    return _maybe_local_default(model_dir_name, hf_id)
+
+
 ASR_PRESETS: dict[str, str] = {
-    "Qwen3-ASR-1.7B": _maybe_local_default("Qwen3-ASR-1.7B", "Qwen/Qwen3-ASR-1.7B"),
-    "Qwen3-ASR-0.6B": _maybe_local_default("Qwen3-ASR-0.6B", "Qwen/Qwen3-ASR-0.6B"),
+    "Qwen3-ASR-1.7B": _prefer_models_dir("Qwen3-ASR-1.7B", "Qwen/Qwen3-ASR-1.7B"),
+    "Qwen3-ASR-0.6B": _prefer_models_dir("Qwen3-ASR-0.6B", "Qwen/Qwen3-ASR-0.6B"),
 }
 
 # Default: prefer local 1.7B, else local 0.6B, else HF 1.7B.
