@@ -265,6 +265,7 @@ def _run_job(**p: Any) -> None:
         asr_init_kwargs_json = str(p.get("asr_init_kwargs_json") or "{}")
         aligner_init_kwargs_json = str(p.get("aligner_init_kwargs_json") or "{}")
         transcribe_kwargs_json = str(p.get("transcribe_kwargs_json") or "{}")
+        hallucination_cfg_json = str(p.get("hallucination_cfg_json") or "{}")
         context_prompt = str(p.get("context_prompt") or "")
 
         vllm_gpu_memory_utilization = float(p.get("vllm_gpu_memory_utilization") or 0.7)
@@ -297,6 +298,8 @@ def _run_job(**p: Any) -> None:
         touch_album_root_mtime = bool(p.get("touch_album_root_mtime", False))
         dedup_same_name_same_duration = bool(p.get("dedup_same_name_same_duration", False))
         skip_if_subtitle_exists = bool(p.get("skip_if_subtitle_exists", False))
+        toolkit_post_process_enabled = bool(p.get("toolkit_post_process_enabled", False))
+        toolkit_post_process_threshold = int(p.get("toolkit_post_process_threshold") or 20)
 
         # Prepare inputs
         if input_mode == "dir":
@@ -353,6 +356,7 @@ def _run_job(**p: Any) -> None:
         transcribe_kwargs = parse_json_dict("transcribe kwargs", transcribe_kwargs_json)
         vad_kwargs = parse_vad_json_dict("VAD kwargs", vad_kwargs_json)
         vllm_kwargs = parse_json_dict("vLLM kwargs", vllm_kwargs_json)
+        hallucination_cfg_obj = parse_json_dict("hallucination cfg", hallucination_cfg_json)
 
         # Only keep `context` and merge UI context.
         transcribe_kwargs = {k: v for k, v in transcribe_kwargs.items() if k == "context"}
@@ -736,6 +740,9 @@ def _run_job(**p: Any) -> None:
                         cap_cfg_d=asdict(cap_cfg),
                         transcribe_kwargs_obj=(transcribe_kwargs or None),
                         vad_cfg_d=asdict(vad_cfg),
+                        hallucination_cfg_obj=(hallucination_cfg_obj or None),
+                        toolkit_post_process_enabled_b=bool(toolkit_post_process_enabled),
+                        toolkit_post_process_threshold_i=int(toolkit_post_process_threshold),
                         output_dir_mode_s=output_dir_mode,
                         custom_output_dir_s=(custom_output_dir.strip() or None),
                         overwrite_b=bool(overwrite),
@@ -1258,6 +1265,9 @@ def _run_job(**p: Any) -> None:
                         caption_cfg=cap_cfg,
                         transcribe_kwargs=transcribe_kwargs or None,
                         vad_cfg=vad_cfg,
+                        hallucination_cfg=(hallucination_cfg_obj or None),
+                        toolkit_post_process_enabled=bool(toolkit_post_process_enabled),
+                        toolkit_post_process_threshold=int(toolkit_post_process_threshold),
                         progress_cb=_progress_cb,
                     )
                 finally:
