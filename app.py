@@ -1040,6 +1040,20 @@ def build_ui() -> gr.Blocks:
             return default
         return v
 
+    def pick_hallu(control_key: str, legacy_key: str, default: Any) -> Any:
+        # New UI uses explicit controls; migrate from old hallucination_cfg_json if needed.
+        if isinstance(persisted, dict) and control_key in persisted:
+            return persisted.get(control_key)
+        try:
+            old = persisted.get("hallucination_cfg_json") if isinstance(persisted, dict) else None
+            if isinstance(old, str) and old.strip():
+                obj = json.loads(old)
+                if isinstance(obj, dict) and legacy_key in obj:
+                    return obj.get(legacy_key)
+        except Exception:
+            pass
+        return default
+
     def as_int(v: Any, default: int) -> int:
         try:
             return int(v)
@@ -1095,16 +1109,6 @@ def build_ui() -> gr.Blocks:
 
             uploads = gr.Files(label="拖拽上传音视频（可多选）", file_count="multiple")
 
-            touch_album_root_mtime = gr.Checkbox(
-                value=as_bool(pick("touch_album_root_mtime", False), False),
-                label="更新专辑根目录修改时间（可选：触发输入目录一级子文件夹 mtime 更新）",
-            )
-
-            dedup_same_name_same_duration = gr.Checkbox(
-                value=as_bool(pick("dedup_same_name_same_duration", False), False),
-                label="同名同长度去重（可选：一级子目录内同名且时长相同的音视频只转录一个，其它复制字幕）",
-            )
-
         with gr.Accordion("输出", open=True):
             with gr.Row():
                 output_format = gr.Radio(
@@ -1128,6 +1132,16 @@ def build_ui() -> gr.Blocks:
                     choices=[("跳过已存在字幕", "skip"), ("覆盖已存在字幕", "overwrite")],
                     value=_pick_existing_policy(),
                     label="同路径已存在同名字幕时",
+                )
+
+            with gr.Row():
+                touch_album_root_mtime = gr.Checkbox(
+                    value=as_bool(pick("touch_album_root_mtime", False), False),
+                    label="更新专辑根目录修改时间（可选：触发输入目录一级子文件夹 mtime 更新）",
+                )
+                dedup_same_name_same_duration = gr.Checkbox(
+                    value=as_bool(pick("dedup_same_name_same_duration", False), False),
+                    label="同名同长度去重（可选：一级子目录内同名且时长相同的音视频只转录一个，其它复制字幕）",
                 )
 
             with gr.Row():
@@ -1342,6 +1356,17 @@ def build_ui() -> gr.Blocks:
                     language="json",
                     label="transcribe kwargs（仅支持 {\"context\": \"...\"}；其它字段会被忽略）",
                 )
+                toolkit_post_process_enabled = gr.Checkbox(
+                    value=as_bool(pick("toolkit_post_process_enabled", False), False),
+                    label="智能后处理（Qwen3-ASR-Toolkit 同款，默认关闭）",
+                )
+                toolkit_post_process_threshold = gr.Slider(
+                    2,
+                    50,
+                    value=as_int(pick("toolkit_post_process_threshold", 20), 20),
+                    step=1,
+                    label="智能后处理阈值 threshold（默认 20）",
+                )
 
         with gr.Accordion("其它", open=False):
             with gr.Row():
@@ -1362,6 +1387,204 @@ def build_ui() -> gr.Blocks:
                 value=as_bool(pick("debug_traceback", False), False),
                 label="显示详细错误（traceback，排查 vLLM/VAD/依赖问题时打开）",
             )
+
+        with gr.Accordion("幻觉检测重试", open=False):
+            hallucination_enabled = gr.Checkbox(
+                value=as_bool(pick_hallu("hallucination_enabled", "enabled", False), False),
+                label="幻觉检测重试",
+            )
+            with gr.Row():
+                retry_segment = gr.Checkbox(
+                    value=as_bool(pick_hallu("retry_segment", "retry_segment", True), True),
+                    label="段级重试",
+                )
+                retry_segment_times = gr.Slider(
+                    0,
+                    5,
+                    value=as_int(pick_hallu("retry_segment_times", "retry_segment_times", 1), 1),
+                    step=1,
+                    label="段级重试次数",
+                )
+            with gr.Row():
+                segment_keywords_csv = gr.Textbox(
+                    value=str(",".join([str(x) for x in (pick_hallu("segment_keywords_csv", "segment_keywords", []) or [])])),
+                    label="段级关键词（逗号分隔）：检测到关键词就进行重试",
+                )
+            with gr.Row():
+                retry_whole_subtitle = gr.Checkbox(
+                    value=as_bool(pick_hallu("retry_whole_subtitle", "retry_whole_subtitle", False), False),
+                    label="整个音视频重试",
+                )
+                retry_whole_times = gr.Slider(
+                    0,
+                    3,
+                    value=as_int(pick_hallu("retry_whole_times", "retry_whole_times", 1), 1),
+                    step=1,
+                    label="整个音视频重试次数",
+                )
+            with gr.Row():
+                whole_retry_use_other_vad = gr.Checkbox(
+                    value=as_bool(pick_hallu("whole_retry_use_other_vad", "whole_retry_use_other_vad", False), False),
+                    label="整个音视频重试使用另一组VAD参数",
+                )
+                whole_retry_vad_threshold = gr.Slider(
+                    0.0,
+                    1.0,
+                    value=as_float(pick_hallu("whole_retry_vad_threshold", "whole_retry_vad_threshold", 0.5), 0.5),
+                    step=0.01,
+                    label="重试VAD threshold",
+                )
+                whole_retry_vad_min_speech_ms = gr.Slider(
+                    0,
+                    2000,
+                    value=as_int(pick_hallu("whole_retry_vad_min_speech_ms", "whole_retry_vad_min_speech_ms", 250), 250),
+                    step=10,
+                    label="重试VAD min_speech_duration_ms",
+                )
+                whole_retry_vad_max_speech_s = gr.Slider(
+                    1,
+                    300,
+                    value=as_float(pick_hallu("whole_retry_vad_max_speech_s", "whole_retry_vad_max_speech_s", 60), 60),
+                    step=1,
+                    label="重试VAD max_speech_duration_s",
+                )
+            with gr.Row():
+                whole_retry_vad_min_silence_ms = gr.Slider(
+                    0,
+                    2000,
+                    value=as_int(pick_hallu("whole_retry_vad_min_silence_ms", "whole_retry_vad_min_silence_ms", 100), 100),
+                    step=10,
+                    label="重试VAD min_silence_duration_ms",
+                )
+                whole_retry_vad_speech_pad_ms = gr.Slider(
+                    0,
+                    1000,
+                    value=as_int(pick_hallu("whole_retry_vad_speech_pad_ms", "whole_retry_vad_speech_pad_ms", 30), 30),
+                    step=10,
+                    label="重试VAD speech_pad_ms",
+                )
+                whole_retry_vad_window_size_samples = gr.Dropdown(
+                    choices=[256, 512, 768, 1024, 1536],
+                    value=as_int(pick_hallu("whole_retry_vad_window_size_samples", "whole_retry_vad_window_size_samples", 512), 512),
+                    label="重试VAD window_size_samples",
+                )
+                whole_retry_vad_merge_gap_ms = gr.Slider(
+                    0,
+                    2000,
+                    value=as_int(pick_hallu("whole_retry_vad_merge_gap_ms", "whole_retry_vad_merge_gap_ms", 120), 120),
+                    step=10,
+                    label="重试VAD merge_gap_ms",
+                )
+                whole_retry_vad_min_segment_ms = gr.Slider(
+                    0,
+                    5000,
+                    value=as_int(pick_hallu("whole_retry_vad_min_segment_ms", "whole_retry_vad_min_segment_ms", 300), 300),
+                    step=10,
+                    label="重试VAD min_segment_ms",
+                )
+            with gr.Row():
+                whole_empty_output_enabled = gr.Checkbox(
+                    value=as_bool(pick_hallu("whole_empty_output_enabled", "whole_empty_output_enabled", False), False),
+                    label="无输出结果重试规则",
+                )
+            with gr.Row():
+                whole_entire_repeat_enabled = gr.Checkbox(
+                    value=as_bool(pick_hallu("whole_entire_repeat_enabled", "whole_entire_repeat_enabled", True), True),
+                    label="启用：整段文本由重复子串构成重试规则",
+                )
+                whole_entire_repeat_min_unit_len = gr.Slider(
+                    1,
+                    20,
+                    value=as_int(pick_hallu("whole_entire_repeat_min_unit_len", "segment_repeat_min_unit_len", 1), 1),
+                    step=1,
+                    label="整段规则：重复子串最少长度",
+                )
+                whole_entire_repeat_min_repeats = gr.Slider(
+                    2,
+                    10,
+                    value=as_int(pick_hallu("whole_entire_repeat_min_repeats", "segment_entire_repeat_n", 3), 3),
+                    step=1,
+                    label="整段规则：该段重复子串最少出现次数",
+                )
+                whole_entire_repeat_min_hits = gr.Slider(
+                    1,
+                    20,
+                    value=as_int(pick_hallu("whole_entire_repeat_min_hits", "whole_entire_repeat_min_hits", 1), 1),
+                    step=1,
+                    label="整段规则：命中规则最少N次数才重试",
+                )
+            with gr.Row():
+                whole_any_repeat_enabled = gr.Checkbox(
+                    value=as_bool(pick_hallu("whole_any_repeat_enabled", "whole_any_repeat_enabled", True), True),
+                    label="启用：文本中有连续重复子串重试规则",
+                )
+                whole_any_repeat_min_unit_len = gr.Slider(
+                    1,
+                    20,
+                    value=as_int(pick_hallu("whole_any_repeat_min_unit_len", "segment_repeat_min_unit_len", 1), 1),
+                    step=1,
+                    label="连续子串规则：重复子串最少长度",
+                )
+                whole_any_repeat_min_repeats = gr.Slider(
+                    2,
+                    10,
+                    value=as_int(pick_hallu("whole_any_repeat_min_repeats", "segment_any_repeat_n", 4), 4),
+                    step=1,
+                    label="连续子串规则：该段重复子串最少出现次数",
+                )
+                whole_any_repeat_min_hits = gr.Slider(
+                    1,
+                    20,
+                    value=as_int(pick_hallu("whole_any_repeat_min_hits", "whole_any_repeat_min_hits", 1), 1),
+                    step=1,
+                    label="连续子串规则：命中规则最少N次数才重试",
+                )
+            with gr.Row():
+                whole_tail_gap_enabled = gr.Checkbox(
+                    value=as_bool(pick_hallu("whole_tail_gap_enabled", "whole_tail_gap_enabled", True), True),
+                    label="启用：字幕尾时间戳与音频时间相差大于N秒重试规则",
+                )
+                whole_tail_gap_s = gr.Slider(
+                    0.0,
+                    500.0,
+                    value=as_float(pick_hallu("whole_tail_gap_s", "whole_tail_gap_s", 15.0), 15.0),
+                    step=0.5,
+                    label="尾时间差阈值（秒）",
+                )
+                whole_long_segment_enabled = gr.Checkbox(
+                    value=as_bool(pick_hallu("whole_long_segment_enabled", "whole_long_segment_enabled", True), True),
+                    label="启用：超长段数量>=N个重试规则",
+                )
+                whole_long_segment_s = gr.Slider(
+                    0.0,
+                    500.0,
+                    value=as_float(pick_hallu("whole_long_segment_s", "whole_long_segment_s", 20.0), 20.0),
+                    step=0.5,
+                    label="超长段阈值（秒）",
+                )
+                whole_long_segment_count = gr.Slider(
+                    1,
+                    20,
+                    value=as_int(pick_hallu("whole_long_segment_count", "whole_long_segment_count", 2), 2),
+                    step=1,
+                    label="超长段数量阈值（>=N个触发）",
+                )
+            with gr.Row():
+                whole_merged_duration_enabled = gr.Checkbox(
+                    value=as_bool(pick_hallu("whole_merged_duration_enabled", "whole_merged_duration_enabled", True), True),
+                    label="启用：出现合并后超过N秒的段则重试",
+                )
+                merge_adjacent_same_text = gr.Checkbox(
+                    value=as_bool(pick_hallu("merge_adjacent_same_text", "merge_adjacent_same_text", True), True),
+                    label="合并相邻且同文本段",
+                )
+                whole_merged_duration_s = gr.Slider(
+                    0.0,
+                    500.0,
+                    value=as_float(pick_hallu("whole_merged_duration_s", "whole_merged_duration_s", 20.0), 20.0),
+                    step=0.5,
+                    label="合并后超长阈值（秒）",
+                )
 
         with gr.Row():
             run_btn = gr.Button("开始批量生成", variant="primary")
@@ -1457,6 +1680,40 @@ def build_ui() -> gr.Blocks:
             "asr_init_kwargs_json",
             "aligner_init_kwargs_json",
             "transcribe_kwargs_json",
+            "hallucination_enabled",
+            "retry_segment",
+            "retry_segment_times",
+            "retry_whole_subtitle",
+            "retry_whole_times",
+            "whole_empty_output_enabled",
+            "whole_retry_use_other_vad",
+            "whole_retry_vad_threshold",
+            "whole_retry_vad_min_speech_ms",
+            "whole_retry_vad_max_speech_s",
+            "whole_retry_vad_min_silence_ms",
+            "whole_retry_vad_speech_pad_ms",
+            "whole_retry_vad_window_size_samples",
+            "whole_retry_vad_merge_gap_ms",
+            "whole_retry_vad_min_segment_ms",
+            "segment_keywords_csv",
+            "whole_entire_repeat_enabled",
+            "whole_entire_repeat_min_unit_len",
+            "whole_entire_repeat_min_repeats",
+            "whole_entire_repeat_min_hits",
+            "whole_any_repeat_enabled",
+            "whole_any_repeat_min_unit_len",
+            "whole_any_repeat_min_repeats",
+            "whole_any_repeat_min_hits",
+            "whole_tail_gap_enabled",
+            "whole_tail_gap_s",
+            "whole_long_segment_enabled",
+            "whole_long_segment_s",
+            "whole_long_segment_count",
+            "whole_merged_duration_enabled",
+            "merge_adjacent_same_text",
+            "whole_merged_duration_s",
+            "toolkit_post_process_enabled",
+            "toolkit_post_process_threshold",
             "vllm_gpu_memory_utilization",
             "vllm_cuda_visible_devices",
             "vllm_kwargs_json",
@@ -1506,6 +1763,40 @@ def build_ui() -> gr.Blocks:
             asr_init_kwargs_json,
             aligner_init_kwargs_json,
             transcribe_kwargs_json,
+            hallucination_enabled,
+            retry_segment,
+            retry_segment_times,
+            retry_whole_subtitle,
+            retry_whole_times,
+            whole_empty_output_enabled,
+            whole_retry_use_other_vad,
+            whole_retry_vad_threshold,
+            whole_retry_vad_min_speech_ms,
+            whole_retry_vad_max_speech_s,
+            whole_retry_vad_min_silence_ms,
+            whole_retry_vad_speech_pad_ms,
+            whole_retry_vad_window_size_samples,
+            whole_retry_vad_merge_gap_ms,
+            whole_retry_vad_min_segment_ms,
+            segment_keywords_csv,
+            whole_entire_repeat_enabled,
+            whole_entire_repeat_min_unit_len,
+            whole_entire_repeat_min_repeats,
+            whole_entire_repeat_min_hits,
+            whole_any_repeat_enabled,
+            whole_any_repeat_min_unit_len,
+            whole_any_repeat_min_repeats,
+            whole_any_repeat_min_hits,
+            whole_tail_gap_enabled,
+            whole_tail_gap_s,
+            whole_long_segment_enabled,
+            whole_long_segment_s,
+            whole_long_segment_count,
+            whole_merged_duration_enabled,
+            merge_adjacent_same_text,
+            whole_merged_duration_s,
+            toolkit_post_process_enabled,
+            toolkit_post_process_threshold,
             vllm_gpu_memory_utilization,
             vllm_cuda_visible_devices,
             vllm_kwargs_json,
@@ -1540,48 +1831,61 @@ def build_ui() -> gr.Blocks:
             except Exception as e:
                 return f"配置保存失败：`{cfg_path.as_posix()}` | 错误：**{e}**"
 
-        # Auto-persist: any settings change writes to data/webui_config.json (mounted => persistent).
-        for c in persist_inputs:
+        def persist_one(key: str, val: Any) -> str:
             try:
-                c.change(fn=persist_config, inputs=persist_inputs, outputs=[config_status], queue=False)
-            except Exception:
-                # be tolerant to gradio component differences across versions
-                pass
+                merge_update(cfg_path, {key: val})
+                ts = time.strftime("%Y-%m-%d %H:%M:%S")
+                return f"配置文件：`{cfg_path.as_posix()}` | 最近保存：**{ts}**"
+            except Exception as e:
+                return f"配置保存失败：`{cfg_path.as_posix()}` | 错误：**{e}**"
 
-        # Textboxes / code editors often don't trigger .change() until blur/enter.
-        # Make autosave robust by marking config "dirty" on .input(), then a timer saves periodically.
-        cfg_dirty = gr.State(False)
-
-        def _mark_cfg_dirty(*_vals: Any) -> bool:
-            return True
-
-        def _persist_if_dirty(*vals_and_dirty: Any) -> tuple[Any, bool]:
+        # Per-field real-time persistence for ALL controls (robust across different component types).
+        persist_pairs = list(zip(persist_keys, persist_inputs))
+        for k, c in persist_pairs:
             try:
-                dirty = bool(vals_and_dirty[-1])
-            except Exception:
-                dirty = False
-            if not dirty:
-                return gr.update(), False
-            vals = vals_and_dirty[:-1]
-            msg = persist_config(*vals)
-            return msg, False
-
-        for c in persist_inputs:
-            try:
-                c.input(fn=_mark_cfg_dirty, inputs=None, outputs=[cfg_dirty], queue=False)
+                c.change(
+                    fn=(lambda v, _k=k: persist_one(_k, v)),
+                    inputs=[c],
+                    outputs=[config_status],
+                    queue=False,
+                )
             except Exception:
                 pass
+            try:
+                c.input(
+                    fn=(lambda v, _k=k: persist_one(_k, v)),
+                    inputs=[c],
+                    outputs=[config_status],
+                    queue=False,
+                )
+            except Exception:
+                pass
 
-        # Reuse the existing 1s timer tick cadence: save config if dirty.
+        def _reload_config_from_disk():
+            """
+            Reload latest config on page load/refresh.
+            Avoids using stale defaults captured at server startup.
+            """
+            cur = load_json(cfg_path)
+            if not isinstance(cur, dict):
+                cur = {}
+            outs: list[Any] = []
+            for k in persist_keys:
+                if k in cur:
+                    outs.append(gr.update(value=cur.get(k)))
+                else:
+                    outs.append(gr.update())
+            return outs
+
         try:
-            timer.tick(
-                fn=_persist_if_dirty,
-                inputs=persist_inputs + [cfg_dirty],
-                outputs=[config_status, cfg_dirty],
-                queue=False,
-            )
+            demo.load(fn=_reload_config_from_disk, inputs=None, outputs=persist_inputs, queue=False)
         except Exception:
             pass
+
+        # NOTE:
+        # We intentionally avoid periodic full-dict "dirty flush" here because it can race with
+        # slider/input events and overwrite new values with stale snapshots.
+        # Single-field realtime persistence above is the source of truth.
 
         def _start_detached(
             input_mode,
@@ -1604,6 +1908,40 @@ def build_ui() -> gr.Blocks:
             asr_init_kwargs_json,
             aligner_init_kwargs_json,
             transcribe_kwargs_json,
+            hallucination_enabled,
+            retry_segment,
+            retry_segment_times,
+            retry_whole_subtitle,
+            retry_whole_times,
+            whole_empty_output_enabled,
+            whole_retry_use_other_vad,
+            whole_retry_vad_threshold,
+            whole_retry_vad_min_speech_ms,
+            whole_retry_vad_max_speech_s,
+            whole_retry_vad_min_silence_ms,
+            whole_retry_vad_speech_pad_ms,
+            whole_retry_vad_window_size_samples,
+            whole_retry_vad_merge_gap_ms,
+            whole_retry_vad_min_segment_ms,
+            segment_keywords_csv,
+            whole_entire_repeat_enabled,
+            whole_entire_repeat_min_unit_len,
+            whole_entire_repeat_min_repeats,
+            whole_entire_repeat_min_hits,
+            whole_any_repeat_enabled,
+            whole_any_repeat_min_unit_len,
+            whole_any_repeat_min_repeats,
+            whole_any_repeat_min_hits,
+            whole_tail_gap_enabled,
+            whole_tail_gap_s,
+            whole_long_segment_enabled,
+            whole_long_segment_s,
+            whole_long_segment_count,
+            whole_merged_duration_enabled,
+            merge_adjacent_same_text,
+            whole_merged_duration_s,
+            toolkit_post_process_enabled,
+            toolkit_post_process_threshold,
             quiet_transformers,
             vllm_gpu_memory_utilization,
             vllm_cuda_visible_devices,
@@ -1635,6 +1973,41 @@ def build_ui() -> gr.Blocks:
             pol = str(existing_subtitle_policy or "skip").strip().lower()
             skip_if_subtitle_exists = pol == "skip"
             overwrite = pol == "overwrite"
+            kws = [x.strip() for x in str(segment_keywords_csv or "").split(",") if x.strip()]
+            hallucination_cfg = dict(
+                enabled=bool(hallucination_enabled),
+                retry_segment=bool(retry_segment),
+                retry_segment_times=int(retry_segment_times),
+                retry_whole_subtitle=bool(retry_whole_subtitle),
+                retry_whole_times=int(retry_whole_times),
+                whole_empty_output_enabled=bool(whole_empty_output_enabled),
+                whole_retry_use_other_vad=bool(whole_retry_use_other_vad),
+                whole_retry_vad_threshold=float(whole_retry_vad_threshold),
+                whole_retry_vad_min_speech_ms=int(whole_retry_vad_min_speech_ms),
+                whole_retry_vad_max_speech_s=float(whole_retry_vad_max_speech_s),
+                whole_retry_vad_min_silence_ms=int(whole_retry_vad_min_silence_ms),
+                whole_retry_vad_speech_pad_ms=int(whole_retry_vad_speech_pad_ms),
+                whole_retry_vad_window_size_samples=int(whole_retry_vad_window_size_samples),
+                whole_retry_vad_merge_gap_ms=int(whole_retry_vad_merge_gap_ms),
+                whole_retry_vad_min_segment_ms=int(whole_retry_vad_min_segment_ms),
+                segment_keywords=kws,
+                whole_entire_repeat_enabled=bool(whole_entire_repeat_enabled),
+                whole_entire_repeat_min_unit_len=int(whole_entire_repeat_min_unit_len),
+                whole_entire_repeat_min_repeats=int(whole_entire_repeat_min_repeats),
+                whole_entire_repeat_min_hits=int(whole_entire_repeat_min_hits),
+                whole_any_repeat_enabled=bool(whole_any_repeat_enabled),
+                whole_any_repeat_min_unit_len=int(whole_any_repeat_min_unit_len),
+                whole_any_repeat_min_repeats=int(whole_any_repeat_min_repeats),
+                whole_any_repeat_min_hits=int(whole_any_repeat_min_hits),
+                whole_tail_gap_enabled=bool(whole_tail_gap_enabled),
+                whole_tail_gap_s=float(whole_tail_gap_s),
+                whole_long_segment_enabled=bool(whole_long_segment_enabled),
+                whole_long_segment_s=float(whole_long_segment_s),
+                whole_long_segment_count=int(whole_long_segment_count),
+                whole_merged_duration_enabled=bool(whole_merged_duration_enabled),
+                merge_adjacent_same_text=bool(merge_adjacent_same_text),
+                whole_merged_duration_s=float(whole_merged_duration_s),
+            )
             msg = detached_start_job(
                 input_mode=input_mode,
                 input_dir=input_dir,
@@ -1656,6 +2029,9 @@ def build_ui() -> gr.Blocks:
                 asr_init_kwargs_json=asr_init_kwargs_json,
                 aligner_init_kwargs_json=aligner_init_kwargs_json,
                 transcribe_kwargs_json=transcribe_kwargs_json,
+                hallucination_cfg_json=json.dumps(hallucination_cfg, ensure_ascii=False),
+                toolkit_post_process_enabled=toolkit_post_process_enabled,
+                toolkit_post_process_threshold=toolkit_post_process_threshold,
                 quiet_transformers=quiet_transformers,
                 vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
                 vllm_cuda_visible_devices=vllm_cuda_visible_devices,
@@ -1725,6 +2101,40 @@ def build_ui() -> gr.Blocks:
                 asr_init_kwargs_json,
                 aligner_init_kwargs_json,
                 transcribe_kwargs_json,
+                hallucination_enabled,
+                retry_segment,
+                retry_segment_times,
+                retry_whole_subtitle,
+                retry_whole_times,
+                whole_empty_output_enabled,
+                whole_retry_use_other_vad,
+                whole_retry_vad_threshold,
+                whole_retry_vad_min_speech_ms,
+                whole_retry_vad_max_speech_s,
+                whole_retry_vad_min_silence_ms,
+                whole_retry_vad_speech_pad_ms,
+                whole_retry_vad_window_size_samples,
+                whole_retry_vad_merge_gap_ms,
+                whole_retry_vad_min_segment_ms,
+                segment_keywords_csv,
+            whole_entire_repeat_enabled,
+            whole_entire_repeat_min_unit_len,
+            whole_entire_repeat_min_repeats,
+            whole_entire_repeat_min_hits,
+            whole_any_repeat_enabled,
+            whole_any_repeat_min_unit_len,
+            whole_any_repeat_min_repeats,
+            whole_any_repeat_min_hits,
+            whole_tail_gap_enabled,
+                whole_tail_gap_s,
+            whole_long_segment_enabled,
+                whole_long_segment_s,
+                whole_long_segment_count,
+            whole_merged_duration_enabled,
+                merge_adjacent_same_text,
+                whole_merged_duration_s,
+                toolkit_post_process_enabled,
+                toolkit_post_process_threshold,
                 quiet_transformers,
                 vllm_gpu_memory_utilization,
                 vllm_cuda_visible_devices,
