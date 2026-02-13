@@ -17,6 +17,9 @@ def vllm_worker_batch(
     cap_cfg_d: dict,
     transcribe_kwargs_obj: dict | None,
     vad_cfg_d: dict,
+    hallucination_cfg_obj: dict | None = None,
+    toolkit_post_process_enabled_b: bool = False,
+    toolkit_post_process_threshold_i: int = 20,
     output_dir_mode_s: str,
     custom_output_dir_s: str | None,
     overwrite_b: bool,
@@ -118,6 +121,9 @@ def vllm_worker_batch(
                     caption_cfg=cap_cfg,
                     transcribe_kwargs=transcribe_kwargs_obj,
                     vad_cfg=vad_cfg,
+                    hallucination_cfg=hallucination_cfg_obj,
+                    toolkit_post_process_enabled=bool(toolkit_post_process_enabled_b),
+                    toolkit_post_process_threshold=int(toolkit_post_process_threshold_i),
                     progress_cb=_progress_cb,
                 )
                 out_path_s = None
@@ -171,6 +177,9 @@ def vllm_worker_queue(
     cap_cfg_d: dict,
     transcribe_kwargs_obj: dict | None,
     vad_cfg_d: dict,
+    hallucination_cfg_obj: dict | None = None,
+    toolkit_post_process_enabled_b: bool = False,
+    toolkit_post_process_threshold_i: int = 20,
     output_dir_mode_s: str,
     custom_output_dir_s: str | None,
     overwrite_b: bool,
@@ -295,6 +304,9 @@ def vllm_worker_queue(
                         caption_cfg=cap_cfg,
                         transcribe_kwargs=transcribe_kwargs_obj,
                         vad_cfg=vad_cfg,
+                        hallucination_cfg=hallucination_cfg_obj,
+                        toolkit_post_process_enabled=bool(toolkit_post_process_enabled_b),
+                        toolkit_post_process_threshold=int(toolkit_post_process_threshold_i),
                         progress_cb=_progress_cb,
                     )
                     out_path_s = None
