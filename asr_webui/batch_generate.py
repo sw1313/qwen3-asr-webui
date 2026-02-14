@@ -450,7 +450,9 @@ def _default_hallucination_cfg() -> dict[str, Any]:
         merge_adjacent_same_text=True,
         whole_merged_duration_s=20.0,
         whole_empty_output_enabled=False,
-        # whole retry VAD override
+        # whole retry VAD mode: none/base/other
+        whole_retry_vad_mode="base",
+        # backward compatibility key
         whole_retry_use_other_vad=False,
         whole_retry_vad_threshold=0.5,
         whole_retry_vad_min_speech_ms=250,
@@ -476,17 +478,26 @@ def _normalize_hallucination_cfg(cfg: dict[str, Any] | None) -> dict[str, Any]:
             out["whole_entire_repeat_min_unit_len"] = cfg.get("segment_repeat_min_unit_len")
         if "whole_any_repeat_min_unit_len" not in cfg and "segment_repeat_min_unit_len" in cfg:
             out["whole_any_repeat_min_unit_len"] = cfg.get("segment_repeat_min_unit_len")
+        if "whole_retry_vad_mode" not in cfg:
+            out["whole_retry_vad_mode"] = "other" if bool(cfg.get("whole_retry_use_other_vad", False)) else "base"
     return out
 
 
-def _apply_whole_retry_vad_cfg(base: VadConfig, hcfg: dict[str, Any]) -> VadConfig:
+def _apply_whole_retry_vad_cfg(base: VadConfig, hcfg: dict[str, Any]) -> tuple[VadConfig, str]:
     """
-    Optional VAD override used only by whole-audio retries.
+    Whole-retry VAD mode selector.
+    Returns (vad_cfg, mode) where mode in {"none","base","other"}.
     """
-    if not bool(hcfg.get("whole_retry_use_other_vad", False)):
-        return base
+    mode = str(hcfg.get("whole_retry_vad_mode", "") or "").strip().lower()
+    if mode not in {"none", "base", "other"}:
+        mode = "other" if bool(hcfg.get("whole_retry_use_other_vad", False)) else "base"
+    if mode == "none":
+        return VadConfig(enabled=False), "none"
+    if mode == "base":
+        return base, "base"
     try:
-        return VadConfig(
+        return (
+            VadConfig(
             enabled=bool(base.enabled),
             backend=base.backend,
             source=base.source,
@@ -501,9 +512,11 @@ def _apply_whole_retry_vad_cfg(base: VadConfig, hcfg: dict[str, Any]) -> VadConf
             merge_gap_ms=int(hcfg.get("whole_retry_vad_merge_gap_ms", base.merge_gap_ms)),
             min_segment_ms=int(hcfg.get("whole_retry_vad_min_segment_ms", base.min_segment_ms)),
             vad_kwargs=base.vad_kwargs,
+            ),
+            "other",
         )
     except Exception:
-        return base
+        return base, "base"
 
 
 def generate_for_one_audio(
@@ -520,6 +533,7 @@ def generate_for_one_audio(
     progress_cb: Any | None = None,
     _whole_retry_left: int | None = None,
     _retry_logs: list[str] | None = None,
+    _whole_recheck_rule_ids: list[int] | None = None,
 ) -> tuple[str, str, str]:
     t0 = time.perf_counter()
     vad_cfg = vad_cfg or VadConfig(enabled=False)
@@ -542,11 +556,13 @@ def generate_for_one_audio(
         if cur_left <= 0:
             return None
         attempt_idx = max(1, whole_retry_times - cur_left + 1)
-        retry_vad_cfg = _apply_whole_retry_vad_cfg(vad_cfg, hcfg)
+        retry_vad_cfg, retry_vad_mode = _apply_whole_retry_vad_cfg(vad_cfg, hcfg)
         start_line = (
             f"[重试] {audio_path.name} 整段触发重试#{attempt_idx}（剩余 {cur_left} 次），原因：无输出结果({reason})\n"
         )
-        if retry_vad_cfg != vad_cfg:
+        if retry_vad_mode == "none":
+            start_line += f"[重试] {audio_path.name} 整段重试不使用VAD\n"
+        elif retry_vad_mode == "other":
             start_line += (
                 f"[重试] {audio_path.name} 整段重试使用替代VAD参数："
                 f"threshold={retry_vad_cfg.threshold},"
@@ -572,6 +588,7 @@ def generate_for_one_audio(
             progress_cb=progress_cb,
             _whole_retry_left=cur_left - 1,
             _retry_logs=retry_logs,
+            _whole_recheck_rule_ids=[6],
         )
         elapsed_retry = time.perf_counter() - t_retry
         end_line = f"[重试] {audio_path.name} 整段重试#{attempt_idx}完成，耗时={elapsed_retry:.2f}s\n"
@@ -784,9 +801,8 @@ def generate_for_one_audio(
     if bool(hcfg.get("enabled")):
         whole_hit = False
         reasons: list[str] = []
-        whole_hit_preview = ""
+        hit_rule_ids: list[int] = []
         # rule 0a: 整段文本由重复子串构成（按字幕段统计命中次数）
-        whole_hit_details: list[str] = []
         if bool(hcfg.get("whole_entire_repeat_enabled", True)):
             whole_entire_min_unit = int(hcfg.get("whole_entire_repeat_min_unit_len", 1) or 1)
             whole_entire_min_rep = int(hcfg.get("whole_entire_repeat_min_repeats", 3) or 3)
@@ -804,15 +820,11 @@ def generate_for_one_audio(
             )
             if len(entire_hits) >= whole_entire_min_hits:
                 whole_hit = True
+                if 1 not in hit_rule_ids:
+                    hit_rule_ids.append(1)
                 reasons.append(
                     f"整段文本由重复子串构成规则命中{len(entire_hits)}次(阈值>={whole_entire_min_hits})"
                 )
-                whole_hit_details.append(_format_rule_hits_for_log(entire_hits, title="整段文本由重复子串构成命中详情"))
-                seg_idx, seg_reason, seg_preview = entire_hits[0]
-                if seg_idx > 0:
-                    whole_hit_preview = f"命中字幕段#{seg_idx} 规则={seg_reason} 文本片段=`{seg_preview}`"
-                else:
-                    whole_hit_preview = f"命中整段文本规则 规则={seg_reason} 文本片段=`{seg_preview}`"
 
         # rule 0b: 文本中有连续重复子串（按字幕段统计命中次数）
         if bool(hcfg.get("whole_any_repeat_enabled", True)):
@@ -832,14 +844,9 @@ def generate_for_one_audio(
             )
             if len(any_hits) >= whole_any_min_hits:
                 whole_hit = True
+                if 2 not in hit_rule_ids:
+                    hit_rule_ids.append(2)
                 reasons.append(f"文本中有连续重复子串规则命中{len(any_hits)}次(阈值>={whole_any_min_hits})")
-                whole_hit_details.append(_format_rule_hits_for_log(any_hits, title="文本中有连续重复子串命中详情"))
-                if not whole_hit_preview:
-                    seg_idx, seg_reason, seg_preview = any_hits[0]
-                    if seg_idx > 0:
-                        whole_hit_preview = f"命中字幕段#{seg_idx} 规则={seg_reason} 文本片段=`{seg_preview}`"
-                    else:
-                        whole_hit_preview = f"命中整段文本规则 规则={seg_reason} 文本片段=`{seg_preview}`"
 
         # rule 1: tail gap (media_duration - last_segment_end) > n
         if bool(hcfg.get("whole_tail_gap_enabled", True)) and segments:
@@ -848,6 +855,8 @@ def generate_for_one_audio(
                 tail_gap = float(dur) - float(getattr(segments[-1], "end_s", 0.0))
                 if tail_gap > float(hcfg.get("whole_tail_gap_s", 15.0) or 15.0):
                     whole_hit = True
+                    if 3 not in hit_rule_ids:
+                        hit_rule_ids.append(3)
                     reasons.append(f"尾段差值过大({tail_gap:.2f}s)")
         # rule 2: long segments count >= n
         if bool(hcfg.get("whole_long_segment_enabled", True)) and segments:
@@ -856,6 +865,8 @@ def generate_for_one_audio(
             long_count = sum(1 for s in segments if (float(getattr(s, "end_s", 0.0)) - float(getattr(s, "start_s", 0.0))) > long_s)
             if long_count >= max(1, long_n):
                 whole_hit = True
+                if 4 not in hit_rule_ids:
+                    hit_rule_ids.append(4)
                 reasons.append(f"超长段数量异常({long_count})")
         # rule 3: merge adjacent same text, then if merged segment duration > n and merged_count>1
         if bool(hcfg.get("whole_merged_duration_enabled", True)) and bool(hcfg.get("merge_adjacent_same_text", True)) and segments:
@@ -863,16 +874,62 @@ def generate_for_one_audio(
             mdur_s = float(hcfg.get("whole_merged_duration_s", 20.0) or 20.0)
             if merge_count > 1 and any((float(s.end_s) - float(s.start_s)) > mdur_s for s in merged):
                 whole_hit = True
+                if 5 not in hit_rule_ids:
+                    hit_rule_ids.append(5)
                 reasons.append("相邻相同段合并后超长")
             # optional: when enabled, keep merged text blocks in final subtitle
             if merge_count > 0:
                 segments = merged
 
-        # whole retry
+        # whole retry / post-retry verification
         whole_retry_times = max(0, int(hcfg.get("retry_whole_times", 1) or 1))
         if _whole_retry_left is None:
             _whole_retry_left = whole_retry_times
-        if whole_hit and bool(hcfg.get("retry_whole_subtitle", False)) and int(_whole_retry_left) > 0:
+        can_whole_retry = bool(hcfg.get("retry_whole_subtitle", False)) and int(_whole_retry_left) > 0
+        had_whole_retry_before = int(_whole_retry_left) < int(whole_retry_times)
+        expected_rule_ids = [int(x) for x in (_whole_recheck_rule_ids or []) if str(x).strip()]
+        def _rule_label(i: int) -> str:
+            if i == 1:
+                n = max(1, int(hcfg.get("whole_entire_repeat_min_hits", 1) or 1))
+                return f"整段文本由重复子串构成≥{n}次"
+            if i == 2:
+                n = max(1, int(hcfg.get("whole_any_repeat_min_hits", 1) or 1))
+                return f"文本中有连续重复子串≥{n}次"
+            if i == 3:
+                s = float(hcfg.get("whole_tail_gap_s", 15.0) or 15.0)
+                return f"字幕尾时间戳与音频时长差值>{s:g}s"
+            if i == 4:
+                n = max(1, int(hcfg.get("whole_long_segment_count", 2) or 2))
+                return f"超长段数量≥{n}"
+            if i == 5:
+                s = float(hcfg.get("whole_merged_duration_s", 20.0) or 20.0)
+                return f"相邻同文本合并后超长>{s:g}s"
+            if i == 6:
+                return "无输出结果"
+            return "未知规则"
+
+        def _fmt_rules(ids: list[int]) -> str:
+            uniq = sorted(set(int(x) for x in ids))
+            if not uniq:
+                return "（无）"
+            return ",".join(f"{i}[{_rule_label(i)}]" for i in uniq)
+
+        ids_text = _fmt_rules(hit_rule_ids)
+        expected_ids_text = _fmt_rules(expected_rule_ids)
+        # If we are in a post-retry pass, explicitly report re-check result.
+        if had_whole_retry_before:
+            if whole_hit:
+                retry_logs.append(
+                    f"[重试] {audio_path.name} 重试后复检：仍命中{ids_text}\n"
+                )
+            else:
+                if expected_rule_ids:
+                    retry_logs.append(
+                        f"[重试] {audio_path.name} 重试后复检：已恢复正常（未再命中{expected_ids_text}）\n"
+                    )
+                else:
+                    retry_logs.append(f"[重试] {audio_path.name} 重试后复检：已恢复正常（未再命中规则）\n")
+        if whole_hit and can_whole_retry:
             hallu_notes.append("整段重试触发:" + ",".join(reasons))
             try:
                 whole_total = max(0, int(hcfg.get("retry_whole_times", 1) or 1))
@@ -883,16 +940,14 @@ def generate_for_one_audio(
             except Exception:
                 cur_left = 1
             attempt_idx = max(1, whole_total - cur_left + 1)
+            reason_compact = f"命中{ids_text}" if hit_rule_ids else ",".join(reasons)
             start_line = (
-                f"[重试] {audio_path.name} 整段触发重试#{attempt_idx}（剩余 {cur_left} 次），原因：{','.join(reasons)}"
-                + (f"；{whole_hit_preview}" if whole_hit_preview else "")
-                + "\n"
+                f"[重试] {audio_path.name} 整段触发重试#{attempt_idx}（剩余 {cur_left} 次），原因：{reason_compact}\n"
             )
-            if whole_hit_details:
-                for d in whole_hit_details:
-                    start_line += f"[重试] {audio_path.name} {d}\n"
-            retry_vad_cfg = _apply_whole_retry_vad_cfg(vad_cfg, hcfg)
-            if retry_vad_cfg != vad_cfg:
+            retry_vad_cfg, retry_vad_mode = _apply_whole_retry_vad_cfg(vad_cfg, hcfg)
+            if retry_vad_mode == "none":
+                start_line += f"[重试] {audio_path.name} 整段重试不使用VAD\n"
+            elif retry_vad_mode == "other":
                 start_line += (
                     f"[重试] {audio_path.name} 整段重试使用替代VAD参数："
                     f"threshold={retry_vad_cfg.threshold},"
@@ -918,6 +973,7 @@ def generate_for_one_audio(
                 progress_cb=progress_cb,
                 _whole_retry_left=int(_whole_retry_left) - 1,
                 _retry_logs=retry_logs,
+                _whole_recheck_rule_ids=sorted(set(hit_rule_ids)),
             )
             elapsed_retry = time.perf_counter() - t_retry
             end_line = f"[重试] {audio_path.name} 整段重试#{attempt_idx}完成，耗时={elapsed_retry:.2f}s\n"
