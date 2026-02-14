@@ -1079,6 +1079,14 @@ def build_ui() -> gr.Blocks:
                 return False
         return bool(default)
 
+    def pick_retry_vad_mode() -> str:
+        v = str(pick_hallu("whole_retry_vad_mode", "whole_retry_vad_mode", "") or "").strip().lower()
+        if v in {"none", "base", "other"}:
+            return v
+        # backward compatibility: old boolean switch
+        old_other = as_bool(pick_hallu("whole_retry_use_other_vad", "whole_retry_use_other_vad", False), False)
+        return "other" if old_other else "base"
+
     with gr.Blocks(title="Qwen3-ASR 批量字幕生成 (SRT/LRC)") as demo:
         gr.Markdown(
             "批量转写并生成带时间轴的字幕（SRT）/歌词（LRC）。"
@@ -1423,10 +1431,16 @@ def build_ui() -> gr.Blocks:
                     label="整个音视频重试次数",
                 )
             with gr.Row():
-                whole_retry_use_other_vad = gr.Checkbox(
-                    value=as_bool(pick_hallu("whole_retry_use_other_vad", "whole_retry_use_other_vad", False), False),
-                    label="整个音视频重试使用另一组VAD参数",
+                whole_retry_vad_mode = gr.Radio(
+                    choices=[
+                        ("整个音视频重试不使用VAD", "none"),
+                        ("整个音视频重试使用原VAD参数", "base"),
+                        ("整个音视频重试使用另一组VAD参数", "other"),
+                    ],
+                    value=pick_retry_vad_mode(),
+                    label="整个音视频重试VAD模式",
                 )
+            with gr.Row():
                 whole_retry_vad_threshold = gr.Slider(
                     0.0,
                     1.0,
@@ -1448,7 +1462,6 @@ def build_ui() -> gr.Blocks:
                     step=1,
                     label="重试VAD max_speech_duration_s",
                 )
-            with gr.Row():
                 whole_retry_vad_min_silence_ms = gr.Slider(
                     0,
                     2000,
@@ -1463,6 +1476,7 @@ def build_ui() -> gr.Blocks:
                     step=10,
                     label="重试VAD speech_pad_ms",
                 )
+            with gr.Row():
                 whole_retry_vad_window_size_samples = gr.Dropdown(
                     choices=[256, 512, 768, 1024, 1536],
                     value=as_int(pick_hallu("whole_retry_vad_window_size_samples", "whole_retry_vad_window_size_samples", 512), 512),
@@ -1686,7 +1700,7 @@ def build_ui() -> gr.Blocks:
             "retry_whole_subtitle",
             "retry_whole_times",
             "whole_empty_output_enabled",
-            "whole_retry_use_other_vad",
+            "whole_retry_vad_mode",
             "whole_retry_vad_threshold",
             "whole_retry_vad_min_speech_ms",
             "whole_retry_vad_max_speech_s",
@@ -1769,7 +1783,7 @@ def build_ui() -> gr.Blocks:
             retry_whole_subtitle,
             retry_whole_times,
             whole_empty_output_enabled,
-            whole_retry_use_other_vad,
+            whole_retry_vad_mode,
             whole_retry_vad_threshold,
             whole_retry_vad_min_speech_ms,
             whole_retry_vad_max_speech_s,
@@ -1914,7 +1928,7 @@ def build_ui() -> gr.Blocks:
             retry_whole_subtitle,
             retry_whole_times,
             whole_empty_output_enabled,
-            whole_retry_use_other_vad,
+            whole_retry_vad_mode,
             whole_retry_vad_threshold,
             whole_retry_vad_min_speech_ms,
             whole_retry_vad_max_speech_s,
@@ -1981,7 +1995,7 @@ def build_ui() -> gr.Blocks:
                 retry_whole_subtitle=bool(retry_whole_subtitle),
                 retry_whole_times=int(retry_whole_times),
                 whole_empty_output_enabled=bool(whole_empty_output_enabled),
-                whole_retry_use_other_vad=bool(whole_retry_use_other_vad),
+                whole_retry_vad_mode=str(whole_retry_vad_mode or "base"),
                 whole_retry_vad_threshold=float(whole_retry_vad_threshold),
                 whole_retry_vad_min_speech_ms=int(whole_retry_vad_min_speech_ms),
                 whole_retry_vad_max_speech_s=float(whole_retry_vad_max_speech_s),
@@ -2107,7 +2121,7 @@ def build_ui() -> gr.Blocks:
                 retry_whole_subtitle,
                 retry_whole_times,
                 whole_empty_output_enabled,
-                whole_retry_use_other_vad,
+                whole_retry_vad_mode,
                 whole_retry_vad_threshold,
                 whole_retry_vad_min_speech_ms,
                 whole_retry_vad_max_speech_s,
