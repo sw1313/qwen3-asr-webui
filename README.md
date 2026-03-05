@@ -397,7 +397,7 @@ python app.py --host 0.0.0.0 --port 7860
 | 模型 | 显存需求 | 推理方式 | 后端 |
 |---|---|---|---|
 | `VibeVoice-ASR`（原版） | 24GB+ | vLLM serve API | vllm |
-| `VibeVoice-ASR-4bit` | 16GB（如 RTX 4060 Ti 16G） | transformers + bitsandbytes | transformers |
+| `VibeVoice-ASR-4bit` | 12GB | transformers + bitsandbytes | transformers |
 
 **Docker 构建**（需要安装 vibevoice 运行时）：
 
