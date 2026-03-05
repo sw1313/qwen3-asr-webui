@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import platform
 import threading
+import importlib.util
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -41,6 +42,22 @@ DTYPE_MAP = {
     "fp16": torch.float16,
     "fp32": torch.float32,
 }
+
+
+def _detect_model_profile(asr_checkpoint: str) -> str:
+    s = (asr_checkpoint or "").strip().lower()
+    if "vibevoice" in s:
+        return "vibevoice"
+    return "qwen3"
+
+
+def _ensure_vibevoice_runtime() -> None:
+    # VibeVoice-ASR vLLM path depends on the vibevoice plugin/runtime.
+    if importlib.util.find_spec("vibevoice") is None:
+        raise RuntimeError(
+            "检测到 VibeVoice-ASR，但当前环境缺少 `vibevoice` 运行时。\n"
+            "请按官方文档安装并使用 vLLM 插件链路（Linux 环境），例如先安装 vibevoice 后再启动服务。"
+        )
 
 
 @dataclass(frozen=True)
@@ -85,15 +102,28 @@ class _ModelCache:
             if cfg.aligner_init_kwargs:
                 fa_kwargs.update(cfg.aligner_init_kwargs)
 
+            use_forced_aligner = bool((cfg.aligner_checkpoint or "").strip()) and (
+                _detect_model_profile(cfg.asr_checkpoint) != "vibevoice"
+            )
+
+            prof = _detect_model_profile(cfg.asr_checkpoint)
+
+            if prof == "vibevoice":
+                raise RuntimeError(
+                    "VibeVoice-ASR 使用独立的 vLLM serve API 链路，不通过 qwen_runner 加载。"
+                    "请确认 batch_generate 正确路由到 vibevoice_runner。"
+                )
+
             if cfg.backend == "transformers":
                 kwargs: dict[str, Any] = dict(
                     dtype=DTYPE_MAP[cfg.dtype],
                     device_map=cfg.device_map,
                     max_inference_batch_size=cfg.max_inference_batch_size,
                     max_new_tokens=cfg.max_new_tokens,
-                    forced_aligner=cfg.aligner_checkpoint,
-                    forced_aligner_kwargs=fa_kwargs,
                 )
+                if use_forced_aligner:
+                    kwargs["forced_aligner"] = cfg.aligner_checkpoint
+                    kwargs["forced_aligner_kwargs"] = fa_kwargs
                 if cfg.attn_implementation:
                     kwargs["attn_implementation"] = cfg.attn_implementation
                 if cfg.asr_init_kwargs:
@@ -113,9 +143,10 @@ class _ModelCache:
                     model=cfg.asr_checkpoint,
                     max_inference_batch_size=cfg.max_inference_batch_size,
                     max_new_tokens=cfg.max_new_tokens,
-                    forced_aligner=cfg.aligner_checkpoint,
-                    forced_aligner_kwargs=fa_kwargs,
                 )
+                if use_forced_aligner:
+                    kwargs2["forced_aligner"] = cfg.aligner_checkpoint
+                    kwargs2["forced_aligner_kwargs"] = fa_kwargs
                 if cfg.vllm_kwargs:
                     kwargs2.update(cfg.vllm_kwargs)
                 if cfg.asr_init_kwargs:
@@ -240,6 +271,8 @@ def _prefer_models_dir(model_dir_name: str, hf_id: str) -> str:
 ASR_PRESETS: dict[str, str] = {
     "Qwen3-ASR-1.7B": _prefer_models_dir("Qwen3-ASR-1.7B", "Qwen/Qwen3-ASR-1.7B"),
     "Qwen3-ASR-0.6B": _prefer_models_dir("Qwen3-ASR-0.6B", "Qwen/Qwen3-ASR-0.6B"),
+    "VibeVoice-ASR": _prefer_models_dir("VibeVoice-ASR", "microsoft/VibeVoice-ASR"),
+    "VibeVoice-ASR-4bit": _prefer_models_dir("VibeVoice-ASR-4bit", "scerz/VibeVoice-ASR-4bit"),
 }
 
 # Default: prefer local 1.7B, else local 0.6B, else HF 1.7B.
