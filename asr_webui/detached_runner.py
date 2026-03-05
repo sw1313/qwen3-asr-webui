@@ -6,6 +6,8 @@ import shutil
 import subprocess
 import threading
 import time
+import importlib.util
+import importlib.metadata
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -21,6 +23,7 @@ from .job_state import append_log as js_append_log
 from .job_state import clear_job as js_clear_job
 from .job_state import reset_job as js_reset_job
 from .job_state import update_state as js_update_state
+from .config_store import default_webui_config_path, load_json
 from .qwen_runner import ASRConfig, unload_model
 from .vad import VadConfig, parse_json_dict as parse_vad_json_dict
 from .vllm_subprocess_batch_worker import vllm_worker_batch, vllm_worker_queue
@@ -33,6 +36,41 @@ _CURRENT_JOB_ID: str | None = None
 
 # Keep a local list to avoid importing heavy modules for a simple suffix check.
 _VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v", ".ts"}
+
+
+def _detect_model_profile(asr_checkpoint: str) -> str:
+    s = (asr_checkpoint or "").strip().lower()
+    if "vibevoice" in s:
+        return "vibevoice"
+    try:
+        preset = load_json(default_webui_config_path()).get("asr_preset", "")
+        if "vibevoice" in (preset or "").lower():
+            return "vibevoice"
+    except Exception:
+        pass
+    return "qwen3"
+
+
+def _allowed_transcribe_kwargs(asr_checkpoint: str) -> set[str]:
+    prof = _detect_model_profile(asr_checkpoint)
+    if prof == "vibevoice":
+        return {"context", "hotwords", "auto_recover", "max_repetition_loops", "repetition_threshold"}
+    return {"context"}
+
+
+def _has_vibevoice_runtime() -> bool:
+    return importlib.util.find_spec("vibevoice") is not None
+
+
+def _has_vibevoice_vllm_plugin() -> bool:
+    try:
+        eps = importlib.metadata.entry_points().select(group="vllm.general_plugins")
+        for e in eps:
+            if "vibevoice" in str(getattr(e, "name", "")).lower():
+                return True
+    except Exception:
+        return False
+    return False
 
 
 def _emit(line: str) -> None:
@@ -334,10 +372,17 @@ def _run_job(**p: Any) -> None:
             return
 
         backend_n = backend.strip().lower()
+        prof = _detect_model_profile(asr_checkpoint)
         if device_map.strip().lower().startswith("cuda") and not torch.cuda.is_available():
             _emit("当前环境 torch 不支持 CUDA，但你选择了 cuda device_map。\n")
             js_update_state(dict(running=False, done=True, last_error="cuda not available"))
             return
+        if prof == "vibevoice":
+            _emit("[信息] 检测到 VibeVoice-ASR，将通过 vLLM serve API 链路处理。\n")
+            if not _has_vibevoice_runtime():
+                _emit("[警告] 当前环境未检测到 `vibevoice` 运行时包，vLLM serve 可能无法启动。\n")
+            if not _has_vibevoice_vllm_plugin():
+                _emit("[警告] 当前环境未检测到 vibevoice vLLM 插件注册，vLLM serve 可能无法启动。\n")
 
         # Parse json kwargs
         def parse_json_dict(name: str, s: str) -> dict:
@@ -358,8 +403,9 @@ def _run_job(**p: Any) -> None:
         vllm_kwargs = parse_json_dict("vLLM kwargs", vllm_kwargs_json)
         hallucination_cfg_obj = parse_json_dict("hallucination cfg", hallucination_cfg_json)
 
-        # Only keep `context` and merge UI context.
-        transcribe_kwargs = {k: v for k, v in transcribe_kwargs.items() if k == "context"}
+        # Keep model-compatible transcribe kwargs and merge UI context.
+        allowed_keys = _allowed_transcribe_kwargs(asr_checkpoint)
+        transcribe_kwargs = {k: v for k, v in transcribe_kwargs.items() if k in allowed_keys}
         if context_prompt.strip():
             transcribe_kwargs["context"] = context_prompt.strip()
 
@@ -1041,6 +1087,33 @@ def _run_job(**p: Any) -> None:
                             name = Path(str(fp_s)).name if fp_s else (cur_name or "unknown")
                             if _active():
                                 _emit(f"[失败] {name}: {msg}\n")
+                            msg_s = str(msg or "")
+                            if "VibeVoice API 调用失败" in msg_s and (
+                                "vLLM serve 未在" in msg_s
+                                or "vLLM serve 进程已退出" in msg_s
+                                or "Connection refused" in msg_s
+                            ):
+                                _emit(
+                                    "[终止] VibeVoice vLLM serve 启动失败。"
+                                    "完整日志请查看容器内 /tmp/vibevoice_vllm_serve.log\n"
+                                )
+                                try:
+                                    ct.terminate_worker()
+                                except Exception:
+                                    pass
+                                if _active():
+                                    js_update_state(
+                                        dict(
+                                            running=False,
+                                            done=True,
+                                            current_file=name,
+                                            current_idx=cur_idx,
+                                            total=n,
+                                            last_error=msg_s,
+                                            output_files=list(output_files.values()),
+                                        )
+                                    )
+                                return
                             if isinstance(msg, str) and ("CUDA out of memory" in msg or "out of memory" in msg.lower()):
                                 oom_restart = (int(idx1), str(msg))
                                 break
