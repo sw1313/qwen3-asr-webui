@@ -17,6 +17,21 @@ from .qwen_runner import ASRConfig, transcribe_with_timestamps
 from .segmenter import iter_tokens, tokens_to_segments
 from .subtitle_formats import Segment, segments_to_lrc, segments_to_srt
 from .vad import VadConfig, cut_waveform_segments, detect_speech_segments
+from .config_store import default_webui_config_path, load_json
+from .vibevoice_runner import VibeVoiceConfig, transcribe_vibevoice, stop_server as _vibe_stop
+
+
+def _is_vibevoice_model(asr_cfg: ASRConfig) -> bool:
+    s = (asr_cfg.asr_checkpoint or "").strip().lower()
+    if "vibevoice" in s:
+        return True
+    try:
+        preset = load_json(default_webui_config_path()).get("asr_preset", "")
+        if "vibevoice" in (preset or "").lower():
+            return True
+    except Exception:
+        pass
+    return False
 
 
 _VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v", ".ts"}
@@ -636,6 +651,113 @@ def generate_for_one_audio(
             progress_cb(5, "预处理完成")
     except Exception:
         pass
+
+    # ---- VibeVoice-ASR: route to vLLM OpenAI API instead of qwen-asr local inference ----
+    if _is_vibevoice_model(asr_cfg):
+        try:
+            hw = ""
+            if transcribe_kwargs and isinstance(transcribe_kwargs, dict):
+                hw = str(transcribe_kwargs.get("hotwords", "") or "")
+            _vv = load_json(default_webui_config_path()).get("vibevoice", {})
+            _vv_model = str(_vv.get("model_path", "") or "").strip()
+            if not _vv_model:
+                _vv_model = asr_cfg.asr_checkpoint
+            _q = str(_vv.get("quantization", "auto"))
+            _lf = str(_vv.get("load_format", "auto"))
+            if _q == "auto" or _lf == "auto":
+                _model_cfg_path = Path(_vv_model) / "config.json"
+                try:
+                    _mcfg = load_json(str(_model_cfg_path))
+                    _qcfg = _mcfg.get("quantization_config", {})
+                    _qm = _qcfg.get("quant_method", "")
+                    if _qm:
+                        if _q == "auto":
+                            _q = _qm
+                        if _lf == "auto":
+                            _lf = _qm
+                        logger.info("自动检测到模型量化方式: %s", _qm)
+                    else:
+                        if _q == "auto":
+                            _q = ""
+                        if _lf == "auto":
+                            _lf = ""
+                except Exception:
+                    if _q == "auto":
+                        _q = ""
+                    if _lf == "auto":
+                        _lf = ""
+            vibe_cfg = VibeVoiceConfig(
+                model_path=_vv_model,
+                gpu_memory_utilization=float(_vv.get("gpu_memory_utilization", 0.90)),
+                max_model_len=int(_vv.get("max_model_len", 4096)),
+                max_num_seqs=int(_vv.get("max_num_seqs", 4)),
+                enforce_eager=bool(_vv.get("enforce_eager", True)),
+                dtype=str(_vv.get("dtype", "bfloat16")),
+                vllm_port=int(_vv.get("vllm_port", 8199)),
+                tensor_parallel_size=int(_vv.get("tensor_parallel_size", 1)),
+                hotwords=str(_vv.get("hotwords", hw)),
+                quantization=_q,
+                load_format=_lf,
+            )
+            full_text, segments = transcribe_vibevoice(
+                work_path,
+                cfg=vibe_cfg,
+                hotwords=hw,
+                progress_cb=progress_cb,
+            )
+        except Exception as e:
+            if tmp_wav is not None:
+                try:
+                    tmp_wav.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            raise RuntimeError(f"VibeVoice API 调用失败: {e}") from e
+
+        if tmp_wav is not None:
+            try:
+                tmp_wav.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        if not full_text.strip() and not segments:
+            retried = _maybe_retry_on_empty_output("VibeVoice 无有效输出")
+            if retried is not None:
+                return retried
+            elapsed_s = time.perf_counter() - t0
+            return f"[空] {audio_path.name}：VibeVoice 无有效文字，输出空文件 时间={elapsed_s:.2f}s\n", "", out_ext
+
+        if toolkit_post_process_enabled:
+            try:
+                th = max(2, int(toolkit_post_process_threshold))
+            except Exception:
+                th = 20
+            full_text = toolkit_post_text_process(full_text, threshold=th)
+            segments = [
+                Segment(start_s=s.start_s, end_s=s.end_s, text=toolkit_post_text_process(s.text, threshold=th))
+                for s in segments
+            ]
+
+        try:
+            if progress_cb:
+                progress_cb(92, "生成字幕")
+        except Exception:
+            pass
+
+        if caption_cfg.output_format == "srt":
+            content = segments_to_srt(segments) if segments else (full_text.strip() + "\n")
+            ext = ".srt"
+        else:
+            content = segments_to_lrc(segments) if segments else (full_text.strip() + "\n")
+            ext = ".lrc"
+
+        elapsed_s = time.perf_counter() - t0
+        prefix = "".join(retry_logs)
+        return (
+            prefix + f"[完成] {audio_path.name} VibeVoice 字符={len(full_text)} 段落={len(segments)} 时间={elapsed_s:.2f}s\n",
+            content,
+            ext,
+        )
+    # ---- End VibeVoice branch ----
 
     if vad_cfg.enabled:
         segs = detect_speech_segments(work_path, cfg=vad_cfg)
