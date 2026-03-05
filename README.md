@@ -1,8 +1,8 @@
 # Qwen3-ASR 批量字幕生成 WebUI（SRT / LRC）
 
 基于 `qwen-asr` 的批量转写 WebUI，支持：
-- **ASR**：`Qwen3-ASR-1.7B` / `Qwen3-ASR-0.6B`
-- **强制对齐/时间戳**：`Qwen3-ForcedAligner-0.6B`
+- **ASR**：`Qwen3-ASR-1.7B` / `Qwen3-ASR-0.6B` / `VibeVoice-ASR` / `VibeVoice-ASR-4bit`
+- **强制对齐/时间戳**：`Qwen3-ForcedAligner-0.6B`（仅 Qwen3-ASR）
 - **输出**：SRT / LRC
 - **可选**：VAD 预处理（去长静音、按语音段转写）、vLLM 后端、FlashAttention 2
 
@@ -43,6 +43,8 @@
 - [Qwen/Qwen3-ASR-1.7B](https://huggingface.co/Qwen/Qwen3-ASR-1.7B)
 - [Qwen/Qwen3-ASR-0.6B](https://huggingface.co/Qwen/Qwen3-ASR-0.6B)
 - [Qwen/Qwen3-ForcedAligner-0.6B](https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B)
+- [microsoft/VibeVoice-ASR](https://huggingface.co/microsoft/VibeVoice-ASR)（9B 参数，需 24GB+ 显存，通过 vLLM 推理）
+- [scerz/VibeVoice-ASR-4bit](https://huggingface.co/scerz/VibeVoice-ASR-4bit)（4-bit 量化，16GB 显存可用，通过 transformers + bitsandbytes 直接推理）
 
 ---
 
@@ -92,6 +94,7 @@ python -c "import torch; print(torch.__version__); print(torch.cuda.is_available
 
 - **方式 A（推荐）**：把模型目录放在 `.\models\Qwen3-ASR-1.7B`（或 `.\models\Qwen3-ASR-0.6B`）与 `.\models\Qwen3-ForcedAligner-0.6B`
 - **方式 B**：不放本地，直接填 Hugging Face 模型 ID（首次需要联网下载）
+- **VibeVoice-ASR-4bit**（可选）：`.\models\VibeVoice-ASR-4bit`，适合 16GB 显存显卡，使用 transformers + bitsandbytes 直接推理
 
 #### 3) 启动 WebUI
 
@@ -115,7 +118,7 @@ python app.py --host 0.0.0.0 --port 7860
 
 在项目根目录创建/准备：
 
-- `models/`：存放模型目录（例如 `models/Qwen3-ASR-1.7B`、`models/Qwen3-ForcedAligner-0.6B`）
+- `models/`：存放模型目录（例如 `models/Qwen3-ASR-1.7B`、`models/Qwen3-ForcedAligner-0.6B`、`models/VibeVoice-ASR-4bit`）
 - `data/`：持久化目录（WebUI 配置 `data/webui_config.json`；任务状态/日志 `data/job_state.json`、`data/job.log`）
 - `output/`：字幕输出目录
 - `cache/`：缓存（HF 模型缓存、torch.hub 的 VAD 缓存等，强烈推荐）
@@ -133,8 +136,11 @@ docker build -t qwen3-asr-webui .
 可选（更快/更省显存的高级能力）：
 
 ```bash
-# 安装 vLLM（Linux/Docker 推荐更快；Windows 一般不可用）
-docker build --build-arg INSTALL_VLLM=1 -t qwen3-asr-webui:vllm .
+# 安装 vLLM + VibeVoice 运行时（Linux/Docker 推荐；VibeVoice-ASR 需要）
+docker build \
+  --build-arg INSTALL_VLLM=1 \
+  --build-arg INSTALL_VIBEVOICE=1 \
+  -t qwen3-asr-webui:vllm .
 
 # 安装 FlashAttention 2（建议使用带 nvcc 的 devel 基底）
 docker build \
@@ -146,6 +152,7 @@ docker build \
 docker build \
   --build-arg BASE_IMAGE=pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel \
   --build-arg INSTALL_VLLM=1 \
+  --build-arg INSTALL_VIBEVOICE=1 \
   --build-arg INSTALL_FLASH_ATTN=1 \
   -t qwen3-asr-webui:vllm-fa2 .
 ```
@@ -250,6 +257,8 @@ docker run --rm -it -p 7860:80 \
 ### vLLM 相关
 
 - **`VLLM_MAX_MODEL_LEN`**：未显式指定时，默认给 vLLM 的 `max_model_len` 上限（默认 `12288`，用于减少 KV cache 启动失败/显存不足风险）
+- **`VIBEVOICE_FFMPEG_MAX_CONCURRENCY`**：VibeVoice 解码并发（默认 `64`，可按 CPU 核数调整）
+- **`PYTORCH_ALLOC_CONF`** / **`PYTORCH_CUDA_ALLOC_CONF`**：默认 `expandable_segments:True`，减少显存碎片导致的 OOM
 
 ### 其它
 
@@ -263,6 +272,7 @@ docker run --rm -it -p 7860:80 \
 
 - **`BASE_IMAGE`**：基础镜像（默认 `pytorch/pytorch:2.4.1-cuda12.4-cudnn9-runtime`）
 - **`INSTALL_VLLM`**：是否安装 vLLM（`0/1`）
+- **`INSTALL_VIBEVOICE`**：是否安装 VibeVoice 运行时（`0/1`，默认 `1`；仅在 `INSTALL_VLLM=1` 时生效）
 - **`INSTALL_FLASH_ATTN`**：是否安装 FlashAttention 2（`0/1`）
 - **`PIP_INDEX_URL`** / **`PIP_EXTRA_INDEX_URL`** / **`PIP_TRUSTED_HOST`**：自定义 pip 源
 - **`ENABLE_NONROOT`**：是否创建并切换到非 root 用户（`0/1`）
@@ -377,6 +387,40 @@ python app.py --host 0.0.0.0 --port 7860
 - **同名不同后缀**（例如 `a.mp3`、`a.flac`）都会生成 `a.srt`：配合上面的“跳过/覆盖”策略可控制行为。
 - **原目录 mtime**：字幕写入采用原子替换，通常会更新字幕所在目录的 mtime。
 - **专辑根目录 mtime（可选）**：WebUI 提供“更新专辑根目录修改时间”开关，可让输入目录的**一级子目录**在首次生成输出后被 touch 一次（适合按专辑排序的 NAS 场景）。
+
+### VibeVoice-ASR（可选）
+
+微软的统一语音识别模型，支持 50+ 语言、说话人分离、时间戳，单次处理最长 60 分钟音频。
+
+**两个版本**：
+
+| 模型 | 显存需求 | 推理方式 | 后端 |
+|---|---|---|---|
+| `VibeVoice-ASR`（原版） | 24GB+ | vLLM serve API | vllm |
+| `VibeVoice-ASR-4bit` | 16GB（如 RTX 4060 Ti 16G） | transformers + bitsandbytes | transformers |
+
+**Docker 构建**（需要安装 vibevoice 运行时）：
+
+```bash
+docker build \
+  --build-arg BASE_IMAGE=pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel \
+  --build-arg INSTALL_VLLM=1 \
+  --build-arg INSTALL_FLASH_ATTN=1 \
+  -t qwen3-asr-webui:latest .
+```
+
+**使用方式**：
+1. 下载模型到 `models/VibeVoice-ASR-4bit`（或 `models/VibeVoice-ASR`）
+2. WebUI 中"ASR 模型预设"选 `VibeVoice-ASR-4bit` 或 `VibeVoice-ASR`
+3. 点击"开始批量生成"即可
+
+**配置独立**：VibeVoice 的参数存储在 `webui_config.json` 的 `vibevoice` 段中，与 Qwen3-ASR 参数互不影响。可编辑的参数包括：
+- `model_path`：模型路径（如 `/models/VibeVoice-ASR-4bit`）
+- `gpu_memory_utilization`：GPU 显存利用率（仅 vLLM 路径有效）
+- `max_model_len` / `max_num_seqs`：vLLM 参数
+- `quantization` / `load_format`：`auto` 自动检测量化方式
+
+> **注意**：模型目录需要**可写**（tokenizer 文件首次运行时会自动生成到模型目录）。Docker 挂载时不要加 `:ro`。
 
 ### FlashAttention 2（可选）
 
