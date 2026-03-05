@@ -4,6 +4,7 @@ import argparse
 import collections
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -78,6 +79,95 @@ LANG_PRESETS = [
     "Russian",
     "Cantonese",
 ]
+
+
+_MODEL_PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
+    "qwen3": {
+        "backend": "transformers",
+        "max_new_tokens": 2048,
+        "vllm_gpu_memory_utilization": 0.7,
+        "vllm_kwargs": {},
+        "transcribe_kwargs": {},
+    },
+    "vibevoice": {
+        "backend": "transformers",
+        "max_new_tokens": 4096,
+        "vllm_gpu_memory_utilization": 0.9,
+        "vllm_kwargs": {"max_model_len": 65536, "trust_remote_code": True},
+        "transcribe_kwargs": {"hotwords": ""},
+    },
+    "vibevoice_4bit": {
+        "backend": "transformers",
+        "max_new_tokens": 4096,
+        "vllm_gpu_memory_utilization": 0.9,
+        "vllm_kwargs": {},
+        "transcribe_kwargs": {"hotwords": ""},
+    },
+}
+
+_TRANSCRIBE_KWARGS_BY_PROFILE: dict[str, set[str]] = {
+    "qwen3": {"context"},
+    "vibevoice": {"context", "hotwords", "auto_recover", "max_repetition_loops", "repetition_threshold"},
+    "vibevoice_4bit": {"context", "hotwords", "auto_recover", "max_repetition_loops", "repetition_threshold"},
+}
+
+
+def _detect_model_profile(asr_checkpoint: str, asr_preset: str = "") -> str:
+    s = f"{asr_preset or ''} {asr_checkpoint or ''}".strip().lower()
+    if "vibevoice" in s:
+        if "4bit" in s or "4-bit" in s or "bnb" in s:
+            return "vibevoice_4bit"
+        return "vibevoice"
+    return "qwen3"
+
+
+def _allowed_transcribe_kwargs(asr_checkpoint: str, asr_preset: str = "") -> set[str]:
+    prof = _detect_model_profile(asr_checkpoint, asr_preset)
+    return _TRANSCRIBE_KWARGS_BY_PROFILE.get(prof, {"context"})
+
+
+def _merge_json_template(cur_json: str, template: dict[str, Any]) -> str:
+    try:
+        cur_obj = json.loads((cur_json or "").strip()) if (cur_json or "").strip() else {}
+        if not isinstance(cur_obj, dict):
+            cur_obj = {}
+    except Exception:
+        cur_obj = {}
+    merged = dict(template)
+    merged.update(cur_obj)
+    return json.dumps(merged, ensure_ascii=False, indent=2)
+
+
+def _build_model_profile_updates(
+    asr_checkpoint: str,
+    asr_preset: str,
+    auto_match: bool,
+    cur_aligner_checkpoint: str,
+    cur_vllm_kwargs_json: str,
+    cur_transcribe_kwargs_json: str,
+) -> tuple[Any, Any, Any, Any, Any, Any]:
+    prof = _detect_model_profile(asr_checkpoint, asr_preset)
+    if prof in ("vibevoice", "vibevoice_4bit"):
+        aligner_update = gr.update(visible=False, value="")
+    else:
+        aligner_v = (cur_aligner_checkpoint or "").strip() or DEFAULT_ALIGNER
+        aligner_update = gr.update(visible=True, value=aligner_v)
+    if not bool(auto_match):
+        return gr.update(), gr.update(), gr.update(), aligner_update, gr.update(), gr.update()
+
+    d = _MODEL_PROFILE_DEFAULTS.get(prof, _MODEL_PROFILE_DEFAULTS["qwen3"])
+    backend_value = str(d["backend"])
+    if prof == "vibevoice" and platform.system().lower().startswith("win") and backend_value == "vllm":
+        # vLLM is typically unavailable on Windows; keep profile params but fallback backend for usability.
+        backend_value = "transformers"
+    return (
+        gr.update(value=backend_value),
+        gr.update(value=int(d["max_new_tokens"])),
+        gr.update(value=float(d["vllm_gpu_memory_utilization"])),
+        aligner_update,
+        gr.update(value=_merge_json_template(cur_vllm_kwargs_json, dict(d["vllm_kwargs"]))),
+        gr.update(value=_merge_json_template(cur_transcribe_kwargs_json, dict(d["transcribe_kwargs"]))),
+    )
 
 
 def _normalize_language(lang: str) -> str | None:
@@ -524,9 +614,9 @@ def run_batch_stream(
         vad_kwargs = parse_vad_json_dict("VAD kwargs", vad_kwargs_json)
         vllm_kwargs = parse_json_dict("vLLM kwargs", vllm_kwargs_json)
 
-        # qwen-asr transcribe() only exposes `context` as a prompt-like knob.
-        # Filter unknown keys to avoid TypeError crashing the batch.
-        dropped = [k for k in list(transcribe_kwargs.keys()) if k != "context"]
+        # Filter model-incompatible keys to avoid TypeError crashing the batch.
+        allowed_keys = _allowed_transcribe_kwargs(asr_checkpoint)
+        dropped = [k for k in list(transcribe_kwargs.keys()) if k not in allowed_keys]
         for k in dropped:
             transcribe_kwargs.pop(k, None)
         if dropped:
@@ -1090,7 +1180,7 @@ def build_ui() -> gr.Blocks:
     with gr.Blocks(title="Qwen3-ASR 批量字幕生成 (SRT/LRC)") as demo:
         gr.Markdown(
             "批量转写并生成带时间轴的字幕（SRT）/歌词（LRC）。"
-            " 模型基于 `qwen-asr`：`Qwen3-ASR-1.7B / 0.6B` + `Qwen3-ForcedAligner-0.6B`。"
+            " 支持 `Qwen3-ASR` 与 `VibeVoice-ASR` 预设，并可在切换模型时自动匹配推荐参数。"
         )
 
         config_status = gr.Markdown(
@@ -1267,12 +1357,26 @@ def build_ui() -> gr.Blocks:
                 label="后端选择",
             )
             asr_preset = gr.Dropdown(
-                choices=["（自动）", "Qwen3-ASR-1.7B", "Qwen3-ASR-0.6B"],
+                choices=["（自动）", "Qwen3-ASR-1.7B", "Qwen3-ASR-0.6B", "VibeVoice-ASR", "VibeVoice-ASR-4bit"],
                 value=str(pick("asr_preset", "（自动）")),
                 label="ASR 模型预设（可选）",
             )
+            auto_match_model_params = gr.Checkbox(
+                value=as_bool(pick("auto_match_model_params", True), True),
+                label="切换模型时自动匹配推荐参数（backend/max_new_tokens/vLLM/transcribe kwargs）",
+            )
             asr_checkpoint = gr.Textbox(value=str(pick("asr_checkpoint", DEFAULT_ASR)), label="ASR 模型（HF ID 或本地路径）")
-            aligner_checkpoint = gr.Textbox(value=str(pick("aligner_checkpoint", DEFAULT_ALIGNER)), label="ForcedAligner 模型（HF ID 或本地路径）")
+            aligner_checkpoint = gr.Textbox(
+                value=str(pick("aligner_checkpoint", DEFAULT_ALIGNER)),
+                label="ForcedAligner 模型（仅 Qwen3-ASR 需要）",
+                visible=(
+                    _detect_model_profile(
+                        str(pick("asr_checkpoint", DEFAULT_ASR)),
+                        str(pick("asr_preset", "（自动）")),
+                    )
+                    not in ("vibevoice", "vibevoice_4bit")
+                ),
+            )
 
             def _apply_asr_preset(preset: str) -> Any:
                 p = (preset or "").strip()
@@ -1285,11 +1389,6 @@ def build_ui() -> gr.Blocks:
                 if not v:
                     return gr.update()
                 return gr.update(value=str(v))
-
-            try:
-                asr_preset.change(fn=_apply_asr_preset, inputs=[asr_preset], outputs=[asr_checkpoint], queue=False)
-            except Exception:
-                pass
 
             with gr.Row():
                 device_map = gr.Textbox(value=str(pick("device_map", "cuda:0")), label="device_map")
@@ -1362,7 +1461,7 @@ def build_ui() -> gr.Blocks:
                 transcribe_kwargs_json = gr.Code(
                     value=str(pick("transcribe_kwargs_json", "{}")),
                     language="json",
-                    label="transcribe kwargs（仅支持 {\"context\": \"...\"}；其它字段会被忽略）",
+                    label="transcribe kwargs（会按当前模型自动过滤不兼容字段；如 context/hotwords/auto_recover）",
                 )
                 toolkit_post_process_enabled = gr.Checkbox(
                     value=as_bool(pick("toolkit_post_process_enabled", False), False),
@@ -1375,6 +1474,73 @@ def build_ui() -> gr.Blocks:
                     step=1,
                     label="智能后处理阈值 threshold（默认 20）",
                 )
+
+            try:
+                asr_preset.change(fn=_apply_asr_preset, inputs=[asr_preset], outputs=[asr_checkpoint], queue=False)
+            except Exception:
+                pass
+
+            def _apply_profile_from_preset(
+                preset: str,
+                auto_match: bool,
+                cur_aligner_checkpoint: str,
+                cur_vllm_kwargs_json: str,
+                cur_transcribe_kwargs_json: str,
+            ):
+                checkpoint = str(ASR_PRESETS.get((preset or "").strip(), "") or "")
+                return _build_model_profile_updates(
+                    asr_checkpoint=checkpoint,
+                    asr_preset=preset,
+                    auto_match=bool(auto_match),
+                    cur_aligner_checkpoint=cur_aligner_checkpoint,
+                    cur_vllm_kwargs_json=cur_vllm_kwargs_json,
+                    cur_transcribe_kwargs_json=cur_transcribe_kwargs_json,
+                )
+
+            def _apply_profile_from_checkpoint(
+                checkpoint: str,
+                preset: str,
+                auto_match: bool,
+                cur_aligner_checkpoint: str,
+                cur_vllm_kwargs_json: str,
+                cur_transcribe_kwargs_json: str,
+            ):
+                return _build_model_profile_updates(
+                    asr_checkpoint=checkpoint,
+                    asr_preset=preset,
+                    auto_match=bool(auto_match),
+                    cur_aligner_checkpoint=cur_aligner_checkpoint,
+                    cur_vllm_kwargs_json=cur_vllm_kwargs_json,
+                    cur_transcribe_kwargs_json=cur_transcribe_kwargs_json,
+                )
+
+            try:
+                asr_preset.change(
+                    fn=_apply_profile_from_preset,
+                    inputs=[asr_preset, auto_match_model_params, aligner_checkpoint, vllm_kwargs_json, transcribe_kwargs_json],
+                    outputs=[backend, max_new_tokens, vllm_gpu_memory_utilization, aligner_checkpoint, vllm_kwargs_json, transcribe_kwargs_json],
+                    queue=False,
+                )
+            except Exception:
+                pass
+            try:
+                asr_checkpoint.change(
+                    fn=_apply_profile_from_checkpoint,
+                    inputs=[asr_checkpoint, asr_preset, auto_match_model_params, aligner_checkpoint, vllm_kwargs_json, transcribe_kwargs_json],
+                    outputs=[backend, max_new_tokens, vllm_gpu_memory_utilization, aligner_checkpoint, vllm_kwargs_json, transcribe_kwargs_json],
+                    queue=False,
+                )
+            except Exception:
+                pass
+            try:
+                auto_match_model_params.change(
+                    fn=_apply_profile_from_checkpoint,
+                    inputs=[asr_checkpoint, asr_preset, auto_match_model_params, aligner_checkpoint, vllm_kwargs_json, transcribe_kwargs_json],
+                    outputs=[backend, max_new_tokens, vllm_gpu_memory_utilization, aligner_checkpoint, vllm_kwargs_json, transcribe_kwargs_json],
+                    queue=False,
+                )
+            except Exception:
+                pass
 
         with gr.Accordion("其它", open=False):
             with gr.Row():
@@ -1682,6 +1848,7 @@ def build_ui() -> gr.Blocks:
             "existing_subtitle_policy",
             "backend",
             "asr_preset",
+            "auto_match_model_params",
             "asr_checkpoint",
             "aligner_checkpoint",
             "device_map",
@@ -1765,6 +1932,7 @@ def build_ui() -> gr.Blocks:
             existing_subtitle_policy,
             backend,
             asr_preset,
+            auto_match_model_params,
             asr_checkpoint,
             aligner_checkpoint,
             device_map,
